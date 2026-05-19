@@ -1,7 +1,10 @@
 #![no_std]
 #![no_main]
 #![feature(impl_trait_in_assoc_type)]
-#![forbid(unsafe_op_in_unsafe_fn)]
+// Deny rather than forbid so the ESP app descriptor below (which needs
+// #[no_mangle] + #[link_section]) can opt-out with a localized #[allow].
+// Everything else in this binary stays unsafe-free.
+#![deny(unsafe_code)]
 #![deny(clippy::large_stack_arrays)]
 #![deny(clippy::large_types_passed_by_value)]
 
@@ -24,6 +27,7 @@ pub struct EspAppDesc {
     pub reserv2: [u32; 18],
 }
 
+#[allow(unsafe_code)] // ESP-IDF bootloader looks up this symbol by name in this section.
 #[link_section = ".rodata_desc"]
 #[used]
 #[no_mangle]
@@ -49,6 +53,7 @@ use embassy_executor::Spawner;
 use esp_hal_embassy::Executor;
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_sync::channel::Channel;
+use esp_hal::analog::adc::{Adc, AdcConfig, Attenuation};
 use esp_hal::gpio::{Io, Input, Output, Level, Pull};
 use esp_hal::entry;
 use esp_hal::timer::timg::TimerGroup;
@@ -119,7 +124,14 @@ fn main() -> ! {
     let busy = Input::new(io.pins.gpio6, Pull::None);
     let home_button = Input::new(io.pins.gpio3, Pull::Up);
 
-    esp_println::println!("Hardware IO and EPD control pins configured!");
+    // ADC1 + GPIO1/GPIO2 ladders for nav buttons (papyrix X4 device-spec).
+    // 11 dB attenuation gives full 0..~3.3 V range across the resistor ladder.
+    let mut adc_cfg = AdcConfig::new();
+    let nav_pin = adc_cfg.enable_pin(io.pins.gpio1, Attenuation::Attenuation11dB);
+    let page_pin = adc_cfg.enable_pin(io.pins.gpio2, Attenuation::Attenuation11dB);
+    let adc1 = Adc::new(peripherals.ADC1, adc_cfg);
+
+    esp_println::println!("Hardware IO, EPD control pins, and ADC1 configured.");
 
     // 3. Configure DMA and SPI for EPD
     let dma = Dma::new(peripherals.DMA);
@@ -132,9 +144,12 @@ fn main() -> ! {
     let dma_rx_buf = esp_hal::dma::DmaRxBuf::new(rx_descriptors, rx_buffer).unwrap();
     let dma_tx_buf = esp_hal::dma::DmaTxBuf::new(tx_descriptors, tx_buffer).unwrap();
 
+    // 40 MHz EPD SPI clock per papyrix X4 docs. SSD1677 tolerates this and it
+    // cuts the 48 KB framebuffer wire time from ~38 ms to ~10 ms, leaving more
+    // headroom for partial-update overlays.
     let spi = Spi::new(
         peripherals.SPI2,
-        10_u32.MHz(),
+        40_u32.MHz(),
         esp_hal::spi::SpiMode::Mode0,
     )
     .with_sck(io.pins.gpio8)
@@ -149,7 +164,9 @@ fn main() -> ! {
     esp_println::println!("Spawning system tasks...");
     executor.run(|spawner: Spawner| {
         spawner.spawn(tasks::display::run(epd_spi)).unwrap();
-        spawner.spawn(tasks::input::run(home_button)).unwrap();
+        spawner
+            .spawn(tasks::input::run(home_button, adc1, nav_pin, page_pin))
+            .unwrap();
         spawner.spawn(tasks::power::run(peripherals.LPWR)).unwrap();
         spawner.spawn(tasks::wifi::run(peripherals.WIFI)).unwrap();
     })

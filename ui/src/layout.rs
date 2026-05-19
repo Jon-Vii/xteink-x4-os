@@ -1,3 +1,4 @@
+use crate::font::{draw_str, GLYPH_HEIGHT, GLYPH_WIDTH};
 use display::fb::Framebuffer;
 use display::render::draw_rect;
 
@@ -160,17 +161,29 @@ impl Arena {
                     }
                 }
                 WidgetKind::Text => {
-                    // Outer panel box for boundary alignment
-                    draw_rect(fb, x, y, w, h, false, false);
-                    // Actual text drawing is handled by the text rasterizer (font) in conjunction
-                    // with this widget's string pool slice.
                     let slot = self.texts[i];
                     if slot.len > 0 {
                         let pool_len = string_pool.len() as u16;
                         let start = slot.offset.min(pool_len) as usize;
                         let end = (slot.offset + slot.len).min(pool_len) as usize;
-                        let _txt = &string_pool[start..end];
-                        // Font rasterization calls draw_char directly into fb
+                        let txt = &string_pool[start..end];
+                        // Clip to the widget's box. Truncate horizontally by the
+                        // number of glyphs that fit; truncate vertically by skipping
+                        // the draw if the row would overflow.
+                        if h >= GLYPH_HEIGHT && w >= GLYPH_WIDTH {
+                            let max_chars = w / GLYPH_WIDTH;
+                            let clipped = if txt.len() > max_chars {
+                                // truncate at a char boundary
+                                let mut cut = max_chars;
+                                while cut > 0 && !txt.is_char_boundary(cut) {
+                                    cut -= 1;
+                                }
+                                &txt[..cut]
+                            } else {
+                                txt
+                            };
+                            draw_str(fb, clipped, x, y, false);
+                        }
                     }
                 }
             }

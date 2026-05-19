@@ -54,9 +54,13 @@ where
         Timer::after_millis(20).await;
     }
 
-    /// Waits asynchronously while the display BUSY pin is asserted high.
+    /// Waits asynchronously while the display BUSY pin signals "busy".
+    ///
+    /// On the Xteink X4 the BUSY line is active-low (LOW = busy), per the
+    /// papyrix-reader X4 spec doc. This is opposite to the bare SSD1677
+    /// datasheet polarity; the board has an inverter on this line.
     pub async fn wait_busy(&mut self) {
-        while self.busy.is_high().unwrap_or(false) {
+        while self.busy.is_low().unwrap_or(false) {
             Timer::after_millis(10).await;
         }
     }

@@ -209,10 +209,12 @@ Band height is tunable; 80 rows = 4 KB per band fits comfortably alongside wi-fi
 
 ### Full refresh vs. partial update
 
-| Mode | Use | Latency |
+| Mode | Use | Latency (estimate, measure to confirm) |
 |------|-----|---------|
-| Full refresh | Page turn, power-on | ~1.5 s |
-| Partial update | UI overlays, progress | ~200 ms (controller-dependent) |
+| Full refresh | Page turn, power-on | ~0.7–1.5 s (panel/LUT/temp dependent) |
+| Partial update | UI overlays, progress | ~200–700 ms (region- and LUT-dependent) |
+
+> Numbers above are derived from SSD1677 waveform timing (~50 Hz frame clock × ~50–80 frame LUT) and similar 4.26" panels. The X4's actual LUT may shift these meaningfully. Measure on the BUSY pin before treating these as constants.
 
 The `display` task exposes `refresh_full()` and `refresh_partial(region: Rect)` — both streaming, both `async`.
 
@@ -573,6 +575,25 @@ espflash flash --monitor target/riscv32imac-unknown-none-elf/release/fw
 
 ---
 
+## 12. Open hardware questions
+
+Items the code commits to *a value* but which need a measurement on a real
+unit before we should treat them as truth. Each line names the file with the
+working assumption.
+
+| Item | Working assumption | Source / why we picked it | Confirm by |
+|------|-------------------|---------------------------|------------|
+| BUSY polarity on GPIO6 | active-low (LOW = busy) | `hal-ext/src/spi_dma.rs` — papyrix X4 driver doc says X4 board has an inverter | scope GPIO6 across a full refresh |
+| EPD SPI clock | 40 MHz | `fw/src/main.rs` — papyrix X4 spec | logic analyzer on SCK during init |
+| SSD1677 init sequence | papyrix-derived 800×480 sequence + booster soft-start + Hi-Z border | `display/src/epd.rs` — the X4 community SDK lists a 480×680 variant; we recomputed RAM-window bytes for 800×480 | flash + visually confirm the panel responds |
+| Full refresh wall time | 0.7–1.5 s | §5 estimate from SSD1677 waveform timing | measure BUSY pulse width |
+| ADC band thresholds for nav ladders | `input.rs` placeholders (Back: 60–500, Confirm: 700–1200, …) | guessed at uniform spacing across 0–4095 at 11 dB | log raw ADC values while pressing each button |
+| Deep-sleep current | ~10–15 µA target | datasheet | uA meter on battery rail during `enter_deep_sleep_timer` |
+
+Phase 1 exit criteria require all six rows above to move from "assumed" to "measured."
+
+---
+
 ## Appendix: Constraint Summary
 
 | Constraint | Value | Source |
@@ -586,5 +607,5 @@ espflash flash --monitor target/riscv32imac-unknown-none-elf/release/fw
 | Target triple | `riscv32imc-unknown-none-elf` | esp-rs canonical for C3 |
 | Atomics | A-extension absent; `portable-atomic` with `unsafe-assume-single-core` | esp-hal feature gate |
 | Flash XIP cache | ~16 KB (instruction only) | ESP32-C3 datasheet |
-| Display refresh (full) | ~1.5 s | EPD physics |
+| Display refresh (full) | ~0.7–1.5 s (estimate) | EPD physics — measure with scope |
 | Deep-sleep current | ~10–15 µA | ESP32-C3 datasheet |
