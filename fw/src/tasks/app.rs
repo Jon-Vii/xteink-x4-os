@@ -1,10 +1,10 @@
 use crate::{
     catalog, AppView, Button, DisplayCommand, DisplayEvent, DisplayOrientation, InputEvent,
-    PowerEvent, RefreshPolicy, RenderKind, RenderRequest, DISPLAY_COMMANDS, DISPLAY_EVENTS,
-    INPUT_EVENTS, POWER_EVENTS,
+    LibraryEvent, PowerEvent, RefreshPolicy, RenderKind, RenderRequest, DISPLAY_COMMANDS,
+    DISPLAY_EVENTS, INPUT_EVENTS, LIBRARY_EVENTS, POWER_EVENTS,
 };
 use display::Rect;
-use embassy_futures::select::{select, Either};
+use embassy_futures::select::{select3, Either3};
 use hal_ext::nvm::AppStateRecord;
 
 const SETTINGS_ITEMS: u8 = 3;
@@ -24,6 +24,7 @@ struct ReaderState {
     page_raw: u16,
     battery_mv: u16,
     battery_percent: u8,
+    library_count: u8,
     dirty: Rect,
 }
 
@@ -43,6 +44,7 @@ impl ReaderState {
             page_raw: 0,
             battery_mv: 0,
             battery_percent: 100,
+            library_count: 0,
             dirty: Rect::FULL,
         }
     }
@@ -86,16 +88,22 @@ impl ReaderState {
             }
 
             (AppView::Library, Some(Button::Next)) => {
-                next.selection = wrap_next(self.selection, library_item_count());
+                next.selection = wrap_next(self.selection, self.library_item_count());
             }
             (AppView::Library, Some(Button::Previous)) => {
-                next.selection = wrap_prev(self.selection, library_item_count());
+                next.selection = wrap_prev(self.selection, self.library_item_count());
             }
             (AppView::Library, Some(Button::Confirm)) => {
-                if let Some(book) = catalog::book_at(self.selection as usize) {
+                if self.selection < self.library_count {
+                    next.book_id = self.selection as u32 + 2;
+                    next.view = AppView::Reading;
+                    next.chapter = 0;
+                    next.selection = 0;
+                    next.page = 0;
+                } else if let Some(book) = catalog::book_at(self.selection as usize) {
                     next.book_id = book.id.0;
                     next.view = AppView::Reading;
-                    next.selection = self.chapter;
+                    next.selection = 0;
                 }
             }
             (AppView::Library, Some(Button::Back)) => {
@@ -161,6 +169,24 @@ impl ReaderState {
         next
     }
 
+    fn apply_library_event(mut self, event: LibraryEvent) -> Self {
+        let LibraryEvent::Scanned { count } = event;
+        self.library_count = count;
+        if self.view == AppView::Library {
+            if count == 0 {
+                self.selection = 0;
+            } else if self.selection >= count {
+                self.selection = count - 1;
+            }
+            self.dirty = Rect::FULL;
+        }
+        self
+    }
+
+    fn library_item_count(self) -> u8 {
+        self.library_count.max(catalog::book_count()).max(1)
+    }
+
     fn persisted(self) -> AppStateRecord {
         AppStateRecord {
             book_id: self.book_id,
@@ -171,10 +197,6 @@ impl ReaderState {
             refresh_policy: self.refresh_policy as u8,
         }
     }
-}
-
-fn library_item_count() -> u8 {
-    catalog::book_count().max(1)
 }
 
 fn wrap_next(value: u8, len: u8) -> u8 {
@@ -231,8 +253,14 @@ pub async fn run() {
     send_render(RenderKind::Boot, state).await;
 
     loop {
-        match select(INPUT_EVENTS.receive(), DISPLAY_EVENTS.receive()).await {
-            Either::First(event) => {
+        match select3(
+            INPUT_EVENTS.receive(),
+            DISPLAY_EVENTS.receive(),
+            LIBRARY_EVENTS.receive(),
+        )
+        .await
+        {
+            Either3::First(event) => {
                 if matches!(
                     event,
                     InputEvent::Sample {
@@ -255,9 +283,19 @@ pub async fn run() {
                     render_pending = false;
                 }
             }
-            Either::Second(DisplayEvent::Settled) => {
+            Either3::Second(DisplayEvent::Settled) => {
                 rendering = false;
                 if render_pending {
+                    send_render(RenderKind::Page, state).await;
+                    rendering = true;
+                    render_pending = false;
+                }
+            }
+            Either3::Third(event) => {
+                state = state.apply_library_event(event);
+                if rendering {
+                    render_pending = true;
+                } else {
                     send_render(RenderKind::Page, state).await;
                     rendering = true;
                     render_pending = false;

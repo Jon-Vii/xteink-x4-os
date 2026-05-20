@@ -1,6 +1,6 @@
 use crate::{
-    catalog, AppView, DisplayCommand, DisplayEvent, DisplayOrientation, PowerEvent, RefreshPolicy,
-    RenderRequest, DISPLAY_COMMANDS, DISPLAY_EVENTS, POWER_EVENTS,
+    catalog, AppView, DisplayCommand, DisplayEvent, DisplayOrientation, LibraryEvent, PowerEvent,
+    RefreshPolicy, RenderRequest, DISPLAY_COMMANDS, DISPLAY_EVENTS, LIBRARY_EVENTS, POWER_EVENTS,
 };
 use display::epd::{
     ram_x_counter, ram_x_range, ram_y_counter, ram_y_range, update_control_1, update_control_2,
@@ -172,6 +172,9 @@ pub async fn run(mut epd: Epd, mut sd_cs: Output<'static>) {
                 if request.view == AppView::Library && sd_library.status == SdStatus::NotScanned {
                     sd_library.status = SdStatus::Scanning;
                     scan_sd_books(&mut epd, &mut sd_cs, &mut sd_library);
+                    let _ = LIBRARY_EVENTS.try_send(LibraryEvent::Scanned {
+                        count: sd_library.count.min(u8::MAX as usize) as u8,
+                    });
                 }
                 render(fb, request, &sd_library);
 

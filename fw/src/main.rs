@@ -150,6 +150,11 @@ pub enum DisplayEvent {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LibraryEvent {
+    Scanned { count: u8 },
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PowerEvent {
     Activity,
     DisplaySettled,
@@ -160,6 +165,7 @@ pub enum PowerEvent {
 pub static INPUT_EVENTS: Channel<CriticalSectionRawMutex, InputEvent, 8> = Channel::new();
 pub static DISPLAY_COMMANDS: Channel<CriticalSectionRawMutex, DisplayCommand, 1> = Channel::new();
 pub static DISPLAY_EVENTS: Channel<CriticalSectionRawMutex, DisplayEvent, 4> = Channel::new();
+pub static LIBRARY_EVENTS: Channel<CriticalSectionRawMutex, LibraryEvent, 4> = Channel::new();
 pub static POWER_EVENTS: Channel<CriticalSectionRawMutex, PowerEvent, 4> = Channel::new();
 
 #[panic_handler]
