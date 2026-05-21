@@ -542,6 +542,18 @@ fn write_landscape_home_mockups(out: &Path) -> std::io::Result<()> {
             "home-landscape-ive-object",
             LandscapeHomeVariant::IveObject,
         ),
+        (
+            "home-landscape-hybrid-soft",
+            LandscapeHomeVariant::HybridSoft,
+        ),
+        (
+            "home-landscape-hybrid-wells",
+            LandscapeHomeVariant::HybridWells,
+        ),
+        (
+            "home-landscape-hybrid-slab",
+            LandscapeHomeVariant::HybridSlab,
+        ),
         ("home-landscape-tabs", LandscapeHomeVariant::Tabs),
         ("home-landscape-book", LandscapeHomeVariant::BookFirst),
     ];
@@ -566,6 +578,9 @@ enum LandscapeHomeVariant {
     IvePure,
     IveGlass,
     IveObject,
+    HybridSoft,
+    HybridWells,
+    HybridSlab,
     Tabs,
     BookFirst,
 }
@@ -583,6 +598,9 @@ fn draw_landscape_home(fb: &mut Framebuffer, variant: LandscapeHomeVariant) {
         LandscapeHomeVariant::IvePure => draw_landscape_home_ive_pure(fb),
         LandscapeHomeVariant::IveGlass => draw_landscape_home_ive_glass(fb),
         LandscapeHomeVariant::IveObject => draw_landscape_home_ive_object(fb),
+        LandscapeHomeVariant::HybridSoft => draw_landscape_home_hybrid_soft(fb),
+        LandscapeHomeVariant::HybridWells => draw_landscape_home_hybrid_wells(fb),
+        LandscapeHomeVariant::HybridSlab => draw_landscape_home_hybrid_slab(fb),
         LandscapeHomeVariant::Tabs => draw_landscape_home_tabs(fb),
         LandscapeHomeVariant::BookFirst => draw_landscape_home_book_first(fb),
     }
@@ -715,6 +733,43 @@ fn draw_landscape_home_ive_object(fb: &mut Framebuffer) {
     draw_text_centered(fb, title_font, "Flowers for Algernon", 504, 424);
     draw_text_centered(fb, body_font, "Daniel Keyes", 504, 454);
     draw_ive_progress(fb, 654, 206, 78, 420);
+}
+
+fn draw_landscape_home_hybrid_soft(fb: &mut Framebuffer) {
+    let title_font = literata(FontStyle::Bold);
+    let body_font = literata(FontStyle::Regular);
+    draw_battery_landscape_minimal(fb, 726, 28, 82);
+    draw_hybrid_soft_rail(fb, 34, 58, 250, 340);
+    fill_rect(fb, Rect::new(326, 52, 1, 360), false);
+    draw_cover_art_minimal(fb, 448, 50, 196, 294);
+    draw_text_centered(fb, title_font, "Flowers for Algernon", 546, 390);
+    draw_text_centered(fb, body_font, "Daniel Keyes", 546, 420);
+    draw_ive_progress(fb, 490, 452, 112, 420);
+}
+
+fn draw_landscape_home_hybrid_wells(fb: &mut Framebuffer) {
+    let title_font = literata(FontStyle::Bold);
+    let body_font = literata(FontStyle::Regular);
+    draw_battery_landscape_minimal(fb, 726, 28, 82);
+    draw_hybrid_well_rail(fb, 38, 66, 238, 324);
+    fill_rect(fb, Rect::new(318, 66, 1, 324), false);
+    fill_rect(fb, Rect::new(324, 96, 1, 264), false);
+    draw_cover_art_minimal(fb, 452, 54, 184, 276);
+    draw_text_centered(fb, title_font, "Flowers for Algernon", 544, 384);
+    draw_text_centered(fb, body_font, "Daniel Keyes", 544, 414);
+    draw_ive_progress(fb, 492, 448, 104, 420);
+}
+
+fn draw_landscape_home_hybrid_slab(fb: &mut Framebuffer) {
+    let title_font = literata(FontStyle::Bold);
+    let body_font = literata(FontStyle::Regular);
+    draw_battery_landscape_minimal(fb, 726, 28, 82);
+    draw_hybrid_slab_rail(fb, 24, 54, 260, 348);
+    fill_rect(fb, Rect::new(326, 54, 1, 348), false);
+    draw_cover_art_minimal(fb, 444, 42, 208, 312);
+    draw_text_centered(fb, title_font, "Flowers for Algernon", 548, 398);
+    draw_text_centered(fb, body_font, "Daniel Keyes", 548, 428);
+    draw_ive_progress(fb, 496, 458, 104, 420);
 }
 
 fn draw_landscape_home_tabs(fb: &mut Framebuffer) {
@@ -883,6 +938,85 @@ fn draw_ive_glass_rail(fb: &mut Framebuffer, x: u16, y: u16, w: u16, h: u16) {
             false,
         );
     }
+}
+
+fn draw_hybrid_soft_rail(fb: &mut Framebuffer, x: u16, y: u16, w: u16, h: u16) {
+    let labels = ["Read", "Files", "Sync", "Settings"];
+    let font = literata(FontStyle::Regular);
+    stroke_rect_direct(fb, x, y, w, h);
+    fill_rect(fb, Rect::new(x + 10, y + 10, w - 20, 1), false);
+    fill_rect(fb, Rect::new(x + 10, y + h - 12, w - 20, 1), false);
+    let row_h = h / labels.len() as u16;
+    for (index, label) in labels.iter().enumerate() {
+        let row_y = y + index as u16 * row_h;
+        if index > 0 {
+            fill_rect(fb, Rect::new(x + 24, row_y, w - 48, 1), false);
+        }
+        draw_text(
+            fb,
+            font,
+            label,
+            x as i16 + 30,
+            row_y as i16 + row_h as i16 / 2 + 8,
+            false,
+        );
+        draw_mini_recess(fb, x + w - 52, row_y + row_h / 2 - 9, 30, 18);
+    }
+}
+
+fn draw_hybrid_well_rail(fb: &mut Framebuffer, x: u16, y: u16, w: u16, h: u16) {
+    let labels = ["Read", "Files", "Sync", "Settings"];
+    let font = literata(FontStyle::Regular);
+    let row_h = h / labels.len() as u16;
+    for (index, label) in labels.iter().enumerate() {
+        let row_y = y + index as u16 * row_h;
+        draw_soft_slot(fb, x, row_y + 8, w, row_h - 16);
+        draw_text(
+            fb,
+            font,
+            label,
+            x as i16 + 30,
+            row_y as i16 + row_h as i16 / 2 + 8,
+            false,
+        );
+        draw_mini_recess(fb, x + w - 50, row_y + row_h / 2 - 9, 30, 18);
+    }
+}
+
+fn draw_hybrid_slab_rail(fb: &mut Framebuffer, x: u16, y: u16, w: u16, h: u16) {
+    let labels = ["Read", "Files", "Sync", "Settings"];
+    let font = literata(FontStyle::Regular);
+    stroke_rect_direct(fb, x, y, w, h);
+    let row_h = h / labels.len() as u16;
+    for (index, label) in labels.iter().enumerate() {
+        let row_y = y + index as u16 * row_h;
+        if index > 0 {
+            fill_rect(fb, Rect::new(x, row_y, w, 1), false);
+        }
+        fill_rect(fb, Rect::new(x + 10, row_y + 10, 1, row_h - 20), false);
+        draw_text(
+            fb,
+            font,
+            label,
+            x as i16 + 32,
+            row_y as i16 + row_h as i16 / 2 + 8,
+            false,
+        );
+        draw_mini_recess(fb, x + w - 52, row_y + row_h / 2 - 9, 30, 18);
+    }
+}
+
+fn draw_soft_slot(fb: &mut Framebuffer, x: u16, y: u16, w: u16, h: u16) {
+    fill_rect(fb, Rect::new(x + 8, y, w - 16, 1), false);
+    fill_rect(fb, Rect::new(x + 8, y + h - 1, w - 16, 1), false);
+    fill_rect(fb, Rect::new(x, y + 8, 1, h - 16), false);
+    fill_rect(fb, Rect::new(x + w - 1, y + 8, 1, h - 16), false);
+}
+
+fn draw_mini_recess(fb: &mut Framebuffer, x: u16, y: u16, w: u16, h: u16) {
+    stroke_rect_direct(fb, x, y, w, h);
+    fill_rect(fb, Rect::new(x + 5, y + 5, w - 10, 1), false);
+    fill_rect(fb, Rect::new(x + 5, y + h - 6, w - 10, 1), false);
 }
 
 fn draw_cover_art_minimal(fb: &mut Framebuffer, x: u16, y: u16, w: u16, h: u16) {
