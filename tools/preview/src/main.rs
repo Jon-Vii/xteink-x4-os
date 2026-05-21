@@ -1,5 +1,5 @@
 use display::fb::Framebuffer;
-use display::font::{draw_text, literata, BitmapFont, FontStyle};
+use display::font::{draw_text, literata, measure_text, BitmapFont, FontStyle};
 use display::render::{draw_ascii, fill_rect};
 use display::{Rect, HEIGHT, WIDTH};
 use proto::book::BookId;
@@ -500,12 +500,189 @@ fn write_page_text(path: &Path, lines: &PreviewLines, page: PageSlice) -> std::i
 
 fn write_static_previews(out: &Path) -> std::io::Result<()> {
     write_shell_preview(out, "home", UiView::Home, 0)?;
+    write_landscape_home_mockups(out)?;
     write_shell_preview(out, "files", UiView::Library, 1)?;
     write_reading(&out.join("reading.pbm"))?;
     write_chapters(&out.join("chapters.pbm"))?;
     write_shell_preview(out, "chapters-ui", UiView::Chapters, 3)?;
     write_shell_preview(out, "settings", UiView::Settings, 1)?;
     Ok(())
+}
+
+fn write_landscape_home_mockups(out: &Path) -> std::io::Result<()> {
+    let variants = [
+        ("home-landscape-rail", LandscapeHomeVariant::Rail),
+        ("home-landscape-tabs", LandscapeHomeVariant::Tabs),
+        ("home-landscape-book", LandscapeHomeVariant::BookFirst),
+    ];
+    for (name, variant) in variants {
+        let mut fb = Framebuffer::new();
+        draw_landscape_home(&mut fb, variant);
+        write_pbm(&out.join(format!("{name}.pbm")), &fb)?;
+        write_png(&out.join(format!("{name}.png")), &fb)?;
+    }
+    Ok(())
+}
+
+#[derive(Clone, Copy)]
+enum LandscapeHomeVariant {
+    Rail,
+    Tabs,
+    BookFirst,
+}
+
+fn draw_landscape_home(fb: &mut Framebuffer, variant: LandscapeHomeVariant) {
+    fb.clear(true);
+    match variant {
+        LandscapeHomeVariant::Rail => draw_landscape_home_rail(fb),
+        LandscapeHomeVariant::Tabs => draw_landscape_home_tabs(fb),
+        LandscapeHomeVariant::BookFirst => draw_landscape_home_book_first(fb),
+    }
+}
+
+fn draw_landscape_home_rail(fb: &mut Framebuffer) {
+    let title_font = literata(FontStyle::Bold);
+    let body_font = literata(FontStyle::Regular);
+    let small_font = literata(FontStyle::Regular);
+    draw_battery_landscape(fb, 724, 24, 82);
+    fill_rect(fb, Rect::new(316, 28, 1, 424), false);
+    draw_landscape_action_stack(fb, 28, 56, 248, 344, 0);
+    draw_cover_art(fb, 430, 48, 205, 306);
+    draw_text_centered(fb, title_font, "Flowers for Algernon", 532, 388);
+    draw_text_centered(fb, body_font, "Daniel Keyes", 532, 418);
+    draw_thin_progress(fb, 462, 442, 140, 420);
+    draw_text(fb, small_font, "42%", 612, 450, false);
+}
+
+fn draw_landscape_home_tabs(fb: &mut Framebuffer) {
+    let title_font = literata(FontStyle::Bold);
+    let body_font = literata(FontStyle::Regular);
+    draw_battery_landscape(fb, 724, 24, 82);
+    draw_cover_art(fb, 468, 50, 190, 284);
+    draw_text(fb, title_font, "Flowers for Algernon", 58, 82, false);
+    draw_text(fb, body_font, "Daniel Keyes", 58, 116, false);
+    draw_thin_progress(fb, 60, 146, 232, 420);
+    draw_text(fb, body_font, "42%", 306, 153, false);
+    fill_rect(fb, Rect::new(58, 198, 318, 1), false);
+    draw_text(fb, body_font, "Current book", 58, 238, false);
+    draw_text(fb, body_font, "Chapter 7", 58, 272, false);
+    draw_bottom_tabs(fb, 16, 416, 768, 52, 0);
+}
+
+fn draw_landscape_home_book_first(fb: &mut Framebuffer) {
+    let title_font = literata(FontStyle::Bold);
+    let body_font = literata(FontStyle::Regular);
+    draw_battery_landscape(fb, 724, 24, 82);
+    draw_landscape_action_stack(fb, 36, 92, 206, 296, 0);
+    draw_cover_art(fb, 336, 34, 245, 366);
+    draw_text_centered(fb, title_font, "Flowers for Algernon", 458, 432);
+    draw_text_centered(fb, body_font, "Daniel Keyes", 458, 460);
+    draw_thin_progress(fb, 622, 156, 120, 420);
+    draw_text(fb, body_font, "42%", 660, 188, false);
+}
+
+fn draw_landscape_action_stack(
+    fb: &mut Framebuffer,
+    x: u16,
+    y: u16,
+    w: u16,
+    h: u16,
+    selected: usize,
+) {
+    let labels = ["Read", "Files", "Sync", "Settings"];
+    let font = literata(FontStyle::Regular);
+    let row_h = h / labels.len() as u16;
+    for (index, label) in labels.iter().enumerate() {
+        let row_y = y + index as u16 * row_h;
+        if index == selected {
+            fill_rect(fb, Rect::new(x, row_y, w, row_h.saturating_sub(2)), false);
+        } else {
+            fill_rect(fb, Rect::new(x, row_y, w, 1), false);
+            fill_rect(
+                fb,
+                Rect::new(x, row_y + row_h.saturating_sub(2), w, 1),
+                false,
+            );
+        }
+        let text_w = measure_text(font, label) as i16;
+        let text_x = x as i16 + 24;
+        let text_y = row_y as i16 + (row_h as i16 / 2) + 8;
+        draw_text(fb, font, label, text_x, text_y, index == selected);
+        fill_rect(
+            fb,
+            Rect::new(x + w - 30, row_y + row_h / 2 - 1, 20, 2),
+            index == selected,
+        );
+        if index == selected {
+            fill_rect(fb, Rect::new(x + 10, row_y + 10, 4, row_h - 22), true);
+        } else {
+            fill_rect(fb, Rect::new((text_x + text_w + 18) as u16, row_y + row_h / 2, 32, 1), false);
+        }
+    }
+}
+
+fn draw_bottom_tabs(fb: &mut Framebuffer, x: u16, y: u16, w: u16, h: u16, selected: usize) {
+    let labels = ["Read", "Files", "Sync", "Settings"];
+    let font = literata(FontStyle::Regular);
+    let tab_w = w / labels.len() as u16;
+    for (index, label) in labels.iter().enumerate() {
+        let tab_x = x + index as u16 * tab_w;
+        if index == selected {
+            fill_rect(fb, Rect::new(tab_x, y, tab_w, h), false);
+        } else {
+            stroke_rect_direct(fb, tab_x, y, tab_w, h);
+        }
+        let text_x = tab_x as i16 + (tab_w as i16 - measure_text(font, label) as i16) / 2;
+        draw_text(fb, font, label, text_x, y as i16 + 34, index == selected);
+    }
+}
+
+fn draw_cover_art(fb: &mut Framebuffer, x: u16, y: u16, w: u16, h: u16) {
+    stroke_rect_direct(fb, x, y, w, h);
+    stroke_rect_direct(fb, x + 8, y + 8, w - 16, h - 16);
+    fill_rect(fb, Rect::new(x + 18, y + 28, w - 36, 2), false);
+    fill_rect(fb, Rect::new(x + 18, y + 58, w - 36, 1), false);
+    fill_rect(fb, Rect::new(x + 28, y + h - 58, w - 56, 2), false);
+    for row in 0..8 {
+        let yy = y + 86 + row * 20;
+        let inset = 24 + (row % 3) * 10;
+        fill_rect(fb, Rect::new(x + inset, yy, w - inset * 2, 3), false);
+    }
+    draw_ascii(fb, "FLOWERS", x as usize + 48, y as usize + 36, false);
+    draw_ascii(
+        fb,
+        "ALGERNON",
+        x as usize + 42,
+        y as usize + h as usize - 40,
+        false,
+    );
+}
+
+fn draw_battery_landscape(fb: &mut Framebuffer, x: u16, y: u16, percent: u8) {
+    let font = literata(FontStyle::Regular);
+    stroke_rect_direct(fb, x, y, 42, 18);
+    fill_rect(fb, Rect::new(x + 42, y + 6, 4, 6), false);
+    let fill_w = ((percent.min(100) as u16 * 34) / 100).max(1);
+    fill_rect(fb, Rect::new(x + 4, y + 4, fill_w, 10), false);
+    draw_text(fb, font, "82%", x as i16 - 48, y as i16 + 16, false);
+}
+
+fn draw_thin_progress(fb: &mut Framebuffer, x: u16, y: u16, w: u16, permille: u16) {
+    fill_rect(fb, Rect::new(x, y, w, 1), false);
+    let fill_w = ((w as u32 * permille.min(1000) as u32) / 1000) as u16;
+    fill_rect(fb, Rect::new(x, y.saturating_sub(2), fill_w.max(1), 5), false);
+}
+
+fn draw_text_centered(fb: &mut Framebuffer, font: &BitmapFont, text: &str, center_x: i16, y: i16) {
+    let x = center_x - measure_text(font, text) as i16 / 2;
+    draw_text(fb, font, text, x, y, false);
+}
+
+fn stroke_rect_direct(fb: &mut Framebuffer, x: u16, y: u16, w: u16, h: u16) {
+    fill_rect(fb, Rect::new(x, y, w, 1), false);
+    fill_rect(fb, Rect::new(x, y + h - 1, w, 1), false);
+    fill_rect(fb, Rect::new(x, y, 1, h), false);
+    fill_rect(fb, Rect::new(x + w - 1, y, 1, h), false);
 }
 
 fn write_shell_preview(
