@@ -255,25 +255,9 @@ impl ReaderState {
                 next.read_request_pending = false;
             }
             (AppView::Home, Some(Button::Confirm)) => {
-                if self.book_id >= 2 {
-                    next.view = AppView::Reading;
-                    next.selection = self.chapter;
-                    next.read_request_pending = false;
-                } else if self.library_count > 0 {
-                    next.book_id = 2;
-                    next.view = AppView::Reading;
-                    next.chapter = 0;
-                    next.selection = 0;
-                    next.page = 0;
-                    next.sd_page_count = 1;
-                    next.sd_chapter_count = 1;
-                    next.sd_chapter_pages = [0; MAX_SD_CHAPTERS];
-                    next.read_request_pending = false;
-                } else {
-                    next.view = AppView::Library;
-                    next.selection = 0;
-                    next.read_request_pending = false;
-                }
+                next.view = AppView::Library;
+                next.selection = 0;
+                next.read_request_pending = false;
             }
             (AppView::Home, Some(Button::Previous)) => {
                 next.view = AppView::Sync;
