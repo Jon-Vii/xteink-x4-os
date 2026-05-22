@@ -237,9 +237,6 @@ impl ReaderState {
                     } else if self.selection >= count {
                         self.selection = count - 1;
                     }
-                    if count > 0 {
-                        self.read_request_pending = false;
-                    }
                     self.dirty = Rect::FULL;
                 }
             }
@@ -276,8 +273,16 @@ impl ReaderState {
             } => {
                 self.book_id = book_id;
                 self.chapter = chapter;
-                self.selection = chapter;
                 self.page = page;
+                if self.read_request_pending {
+                    self.view = AppView::Reading;
+                    self.selection = chapter;
+                } else if self.view == AppView::Library {
+                    let restored_index = book_id.saturating_sub(2).min(u8::MAX as u32) as u8;
+                    self.selection = restored_index.min(self.library_count.saturating_sub(1));
+                } else {
+                    self.selection = chapter;
+                }
                 self.read_request_pending = false;
                 if let Some(orientation) = display_orientation_from_u8(reading_orientation) {
                     self.orientation = orientation;

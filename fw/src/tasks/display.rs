@@ -46,10 +46,15 @@ pub async fn run(mut epd: Epd, mut sd_cs: Output<'static>) {
             DisplayCommand::Render(request) => {
                 let mut content_context_changed =
                     last_view != Some(request.view) || last_book_id != Some(request.book_id);
-                if request.view == AppView::Library
-                    && sd_library.status == LibraryScanStatus::NotScanned
-                {
+                let defer_library_scan = request.view == AppView::Library
+                    && sd_library.status == LibraryScanStatus::NotScanned;
+                if defer_library_scan {
                     sd_library.status = LibraryScanStatus::Scanning;
+                }
+                if request.view == AppView::Library
+                    && sd_library.status == LibraryScanStatus::Scanning
+                    && !defer_library_scan
+                {
                     crate::library_sd::scan_books(&mut epd, &mut sd_cs, &mut sd_library);
                     let _ = LIBRARY_EVENTS.try_send(LibraryEvent::Scanned {
                         count: sd_library.count.min(u8::MAX as usize) as u8,
@@ -61,12 +66,6 @@ pub async fn run(mut epd: Epd, mut sd_cs: Output<'static>) {
                             record.book_id,
                         ) {
                             sd_library.set_current_index(index);
-                            reader_cache::load_current_cover(
-                                &mut epd,
-                                &mut sd_cs,
-                                &mut sd_library,
-                                index,
-                            );
                             let book_id = index as u32 + 2;
                             let _ = LIBRARY_EVENTS.try_send(LibraryEvent::Restored {
                                 book_id,
@@ -167,6 +166,9 @@ pub async fn run(mut epd: Epd, mut sd_cs: Output<'static>) {
                     esp_println::println!("display: SPI transfer failed");
                 }
                 last_request = Some(request);
+                if defer_library_scan {
+                    let _ = DISPLAY_COMMANDS.try_send(DisplayCommand::Render(request));
+                }
             }
             DisplayCommand::Sleep => {
                 if let Some(request) = last_request {

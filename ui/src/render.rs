@@ -1,13 +1,11 @@
 use crate::{UiCover, UiLibraryStatus, UiOrientation, UiRefreshPolicy, UiShell, UiTocItem, UiView};
 use display::fb::Framebuffer;
 use display::font::{draw_text, literata, measure_text, BitmapFont, FontStyle};
-use display::render::{fill_rect, glyph_5x7, stroke_rect};
+use display::render::{fill_rect, stroke_rect};
 use display::{Rect, HEIGHT, WIDTH};
 
 const HOME_ITEMS: [&str; 4] = ["Read", "Files", "Sync", "Settings"];
 const SETTINGS_ITEMS: [&str; 3] = ["ORIENTATION", "REFRESH", "BACK TO HOME"];
-const SHELL_ORIENTATION: UiOrientation = UiOrientation::PortraitButtonsLeft;
-
 pub fn render_shell(fb: &mut Framebuffer, shell: &UiShell<'_>) {
     fb.clear(true);
     match shell.view {
@@ -44,65 +42,93 @@ fn render_home(fb: &mut Framebuffer, shell: &UiShell<'_>) {
 }
 
 fn render_library(fb: &mut Framebuffer, shell: &UiShell<'_>) {
-    let mut ui = Ui::new(fb, SHELL_ORIENTATION);
-    ui.draw_ascii("FILES", 64, 72, false);
-    ui.fill_rect(64, 110, 352, 2, false);
-    ui.draw_ascii("/books then /", 64, 132, false);
+    fb.clear(true);
+    let title_font = literata(FontStyle::Bold);
+    let body_font = literata(FontStyle::Regular);
+    let meta_font = literata(FontStyle::Italic);
+    draw_text(fb, title_font, "Files", 58, 54, false);
+    draw_text(fb, meta_font, "/books, then card root", 58, 84, false);
+    draw_battery_landscape_minimal(fb, 718, 32, shell.battery_percent);
+    fill_rect(fb, Rect::new(58, 104, 684, 1), false);
 
     match shell.library_status {
         UiLibraryStatus::NotScanned | UiLibraryStatus::Scanning => {
-            ui.draw_ascii("SCANNING MICROSD", 64, 216, false);
+            draw_text(fb, body_font, "Scanning microSD", 58, 190, false);
             return;
         }
         UiLibraryStatus::Error => {
-            ui.draw_ascii("MICROSD NOT READY", 64, 216, false);
-            ui.draw_ascii("USE FAT16/FAT32", 64, 248, false);
+            draw_text(fb, body_font, "microSD not ready", 58, 190, false);
+            draw_text(fb, meta_font, "Use FAT16/FAT32", 58, 224, false);
             return;
         }
         UiLibraryStatus::Empty => {
-            ui.draw_ascii("NO EPUB FILES FOUND", 64, 216, false);
-            ui.draw_ascii("PUT BOOKS IN /books", 64, 248, false);
+            draw_text(fb, body_font, "No EPUB files found", 58, 190, false);
+            draw_text(fb, meta_font, "Put books in /books", 58, 224, false);
             return;
         }
         UiLibraryStatus::Ready => {}
     }
 
     if shell.library_entries.is_empty() {
-        ui.draw_ascii("NO EPUB FILES FOUND", 64, 216, false);
+        draw_text(fb, body_font, "No EPUB files found", 58, 190, false);
         return;
     }
 
-    let mut y = 198;
-    for (index, entry) in shell.library_entries.iter().take(9).enumerate() {
+    let mut baseline_y = 142i16;
+    for (index, entry) in shell.library_entries.iter().take(8).enumerate() {
         let selected = index == shell.selection as usize;
         if selected {
-            ui.fill_rect(56, y - 12, 368, 32, false);
+            fill_rect(fb, Rect::new(46, (baseline_y - 24) as u16, 708, 31), false);
         }
-        ui.draw_ascii(if selected { ">" } else { " " }, 76, y as usize, selected);
-        ui.draw_ascii(entry, 112, y as usize, selected);
-        y += 48;
+        if selected {
+            draw_text(fb, body_font, ">", 60, baseline_y, true);
+        }
+        draw_text_truncated(fb, body_font, entry, 92, baseline_y, 620, selected);
+        baseline_y += 38;
     }
+    draw_text(fb, meta_font, "OK opens  Back returns", 58, 448, false);
 }
 
 fn render_settings(fb: &mut Framebuffer, shell: &UiShell<'_>) {
-    let mut ui = Ui::new(fb, SHELL_ORIENTATION);
-    draw_menu(&mut ui, "SETTINGS", &SETTINGS_ITEMS, shell.selection);
-    ui.draw_ascii("READING ORIENTATION", 64, 380, false);
-    ui.draw_ascii(orientation_label(shell.orientation), 64, 408, false);
-    ui.draw_ascii("REFRESH", 64, 464, false);
-    ui.draw_ascii(refresh_policy_label(shell.refresh_policy), 64, 492, false);
+    fb.clear(true);
+    let title_font = literata(FontStyle::Bold);
+    let body_font = literata(FontStyle::Regular);
+    let meta_font = literata(FontStyle::Italic);
+    draw_text(fb, title_font, "Settings", 58, 54, false);
+    draw_battery_landscape_minimal(fb, 718, 32, shell.battery_percent);
+    fill_rect(fb, Rect::new(58, 104, 684, 1), false);
+
+    let values = [
+        orientation_label(shell.orientation),
+        refresh_policy_label(shell.refresh_policy),
+        "",
+    ];
+    let mut baseline_y = 156i16;
+    for (index, item) in SETTINGS_ITEMS.iter().enumerate() {
+        let selected = index == shell.selection as usize;
+        if selected {
+            fill_rect(fb, Rect::new(46, (baseline_y - 25) as u16, 708, 34), false);
+        }
+        if selected {
+            draw_text(fb, body_font, ">", 60, baseline_y, true);
+        }
+        draw_text(fb, body_font, item, 92, baseline_y, selected);
+        if !values[index].is_empty() {
+            draw_text_truncated(fb, meta_font, values[index], 410, baseline_y, 300, selected);
+        }
+        baseline_y += 54;
+    }
 }
 
 fn render_sync(fb: &mut Framebuffer) {
-    let mut ui = Ui::new(fb, SHELL_ORIENTATION);
-    ui.draw_ascii("SYNC", centered_x_for(480, "SYNC"), 300, false);
-    ui.draw_ascii(
-        "NOT CONFIGURED",
-        centered_x_for(480, "NOT CONFIGURED"),
-        344,
-        false,
-    );
-    ui.draw_ascii("BACK", centered_x_for(480, "BACK"), 620, false);
+    fb.clear(true);
+    let title_font = literata(FontStyle::Bold);
+    let body_font = literata(FontStyle::Regular);
+    let meta_font = literata(FontStyle::Italic);
+    draw_text(fb, title_font, "Sync", 58, 54, false);
+    fill_rect(fb, Rect::new(58, 104, 684, 1), false);
+    draw_text(fb, body_font, "Not configured", 58, 190, false);
+    draw_text(fb, meta_font, "Back returns", 58, 448, false);
 }
 
 fn render_chapters_landscape(fb: &mut Framebuffer, shell: &UiShell<'_>) {
@@ -161,21 +187,6 @@ fn draw_literata_toc_item(
         650usize.saturating_sub(indent as usize),
         selected,
     );
-}
-
-fn draw_menu(ui: &mut Ui<'_>, title: &str, items: &[&str], selection: u8) {
-    ui.draw_ascii(title, 64, 72, false);
-    ui.fill_rect(64, 110, 352, 2, false);
-    let mut y = 172;
-    for (index, item) in items.iter().enumerate() {
-        let selected = index == selection as usize;
-        if selected {
-            ui.fill_rect(56, y - 12, 368, 32, false);
-        }
-        ui.draw_ascii(if selected { ">" } else { " " }, 76, y as usize, selected);
-        ui.draw_ascii(item, 112, y as usize, selected);
-        y += 48;
-    }
 }
 
 fn draw_dock_clean_rail(fb: &mut Framebuffer, x: u16, y: u16, w: u16, h: u16) {
@@ -381,10 +392,6 @@ fn fit_text<'a>(font: &BitmapFont, text: &'a str, max_w: u16) -> &'a str {
     text[..end].trim_end()
 }
 
-fn centered_x_for(width: usize, text: &str) -> usize {
-    width.saturating_sub(text.len() * 8) / 2
-}
-
 fn fmt_chapter_counter(current: usize, total: usize, buf: &mut [u8; 32]) -> &str {
     let mut cursor = 0;
     push_str(buf, &mut cursor, "Chapter ");
@@ -440,94 +447,5 @@ fn refresh_policy_label(policy: UiRefreshPolicy) -> &'static str {
         UiRefreshPolicy::FastOnly => "FAST ONLY",
         UiRefreshPolicy::FullOnWake => "FULL ON WAKE",
         UiRefreshPolicy::FullEveryTen => "FULL EVERY 10",
-    }
-}
-
-struct Ui<'a> {
-    fb: &'a mut Framebuffer,
-    orientation: UiOrientation,
-}
-
-impl<'a> Ui<'a> {
-    fn new(fb: &'a mut Framebuffer, orientation: UiOrientation) -> Self {
-        Self { fb, orientation }
-    }
-
-    fn fill_rect(&mut self, x: u16, y: u16, w: u16, h: u16, white: bool) {
-        let y = self.logical_y_for_height(y, h);
-        for yy in y..y.saturating_add(h) {
-            for xx in x..x.saturating_add(w) {
-                self.set_pixel(xx as usize, yy as usize, white);
-            }
-        }
-    }
-
-    fn draw_ascii(&mut self, text: &str, x: usize, y: usize, white: bool) {
-        let y = self.logical_y_for_height(y as u16, 7) as usize;
-        let mut cursor = x;
-        for byte in text.bytes() {
-            self.draw_glyph(byte, cursor, y, white);
-            cursor += 8;
-        }
-    }
-
-    fn draw_glyph(&mut self, byte: u8, x: usize, y: usize, white: bool) {
-        let glyph = glyph_5x7(byte);
-        for (col, bits) in glyph.iter().enumerate() {
-            for row in 0..7 {
-                if bits & (1 << row) != 0 {
-                    self.set_pixel(x + col, y + row, white);
-                }
-            }
-        }
-    }
-
-    fn set_pixel(&mut self, x: usize, y: usize, white: bool) {
-        let Some((fx, fy)) = map_ui_pixel(self.orientation, x, y) else {
-            return;
-        };
-        self.fb.set_pixel(fx, fy, white);
-    }
-
-    fn logical_y_for_height(&self, y: u16, h: u16) -> u16 {
-        match self.orientation {
-            UiOrientation::PortraitButtonsLeft | UiOrientation::PortraitButtonsRight => {
-                (WIDTH as u16).saturating_sub(y.saturating_add(h))
-            }
-            UiOrientation::LandscapeButtonsBottom | UiOrientation::LandscapeButtonsTop => y,
-        }
-    }
-}
-
-fn map_ui_pixel(orientation: UiOrientation, x: usize, y: usize) -> Option<(usize, usize)> {
-    match orientation {
-        UiOrientation::LandscapeButtonsBottom => {
-            if x < WIDTH && y < HEIGHT {
-                Some((x, y))
-            } else {
-                None
-            }
-        }
-        UiOrientation::LandscapeButtonsTop => {
-            if x < WIDTH && y < HEIGHT {
-                Some((WIDTH - 1 - x, HEIGHT - 1 - y))
-            } else {
-                None
-            }
-        }
-        UiOrientation::PortraitButtonsRight => {
-            if x < HEIGHT && y < WIDTH {
-                Some((WIDTH - 1 - y, x))
-            } else {
-                None
-            }
-        }
-        UiOrientation::PortraitButtonsLeft => {
-            if x < HEIGHT && y < WIDTH {
-                Some((y, HEIGHT - 1 - x))
-            } else {
-                None
-            }
-        }
     }
 }
