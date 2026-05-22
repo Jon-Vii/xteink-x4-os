@@ -85,9 +85,12 @@ impl ReaderState {
                     next.selection = self.chapter;
                     next.read_request_pending = false;
                 } else {
-                    next.view = AppView::Library;
+                    next.book_id = 1;
+                    next.view = AppView::Reading;
+                    next.chapter = 0;
                     next.selection = 0;
-                    next.read_request_pending = true;
+                    next.page = 0;
+                    next.read_request_pending = false;
                 }
             }
             (AppView::Home, Some(Button::Confirm)) => {
@@ -225,14 +228,7 @@ impl ReaderState {
             LibraryEvent::Scanned { count } => {
                 self.library_count = count;
                 if self.view == AppView::Library {
-                    if self.read_request_pending && count == 0 {
-                        self.book_id = 1;
-                        self.chapter = 0;
-                        self.page = 0;
-                        self.selection = 0;
-                        self.view = AppView::Reading;
-                        self.read_request_pending = false;
-                    } else if count == 0 {
+                    if count == 0 {
                         self.selection = 0;
                     } else if self.selection >= count {
                         self.selection = count - 1;

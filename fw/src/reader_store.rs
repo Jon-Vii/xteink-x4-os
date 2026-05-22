@@ -318,26 +318,6 @@ impl ReaderStore {
             self.current_index = Some(index);
         }
     }
-
-    pub(crate) fn find_entry_by_state(
-        &self,
-        source_hash: u32,
-        source_size: u32,
-        fallback_book_id: u32,
-    ) -> Option<usize> {
-        if source_hash != 0 {
-            if let Some(index) = self.entries.iter().take(self.count).position(|entry| {
-                entry.source_hash == source_hash
-                    && (source_size == 0 || entry.byte_size == source_size)
-            }) {
-                return Some(index);
-            }
-        }
-        fallback_book_id
-            .checked_sub(2)
-            .map(|index| index as usize)
-            .filter(|index| *index < self.count)
-    }
 }
 
 pub(crate) fn publish_chapter_pages(book_id: u32, store: &ReaderStore) {

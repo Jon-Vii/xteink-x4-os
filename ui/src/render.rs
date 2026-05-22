@@ -54,16 +54,19 @@ fn render_library(fb: &mut Framebuffer, shell: &UiShell<'_>) {
     match shell.library_status {
         UiLibraryStatus::NotScanned | UiLibraryStatus::Scanning => {
             draw_text(fb, body_font, "Scanning microSD", 58, 190, false);
+            mirror_framebuffer_long_axis(fb);
             return;
         }
         UiLibraryStatus::Error => {
             draw_text(fb, body_font, "microSD not ready", 58, 190, false);
             draw_text(fb, meta_font, "Use FAT16/FAT32", 58, 224, false);
+            mirror_framebuffer_long_axis(fb);
             return;
         }
         UiLibraryStatus::Empty => {
             draw_text(fb, body_font, "No EPUB files found", 58, 190, false);
             draw_text(fb, meta_font, "Put books in /books", 58, 224, false);
+            mirror_framebuffer_long_axis(fb);
             return;
         }
         UiLibraryStatus::Ready => {}
@@ -71,6 +74,7 @@ fn render_library(fb: &mut Framebuffer, shell: &UiShell<'_>) {
 
     if shell.library_entries.is_empty() {
         draw_text(fb, body_font, "No EPUB files found", 58, 190, false);
+        mirror_framebuffer_long_axis(fb);
         return;
     }
 
@@ -87,6 +91,7 @@ fn render_library(fb: &mut Framebuffer, shell: &UiShell<'_>) {
         baseline_y += 38;
     }
     draw_text(fb, meta_font, "OK opens  Back returns", 58, 448, false);
+    mirror_framebuffer_long_axis(fb);
 }
 
 fn render_settings(fb: &mut Framebuffer, shell: &UiShell<'_>) {
@@ -118,6 +123,7 @@ fn render_settings(fb: &mut Framebuffer, shell: &UiShell<'_>) {
         }
         baseline_y += 54;
     }
+    mirror_framebuffer_long_axis(fb);
 }
 
 fn render_sync(fb: &mut Framebuffer) {
@@ -129,6 +135,7 @@ fn render_sync(fb: &mut Framebuffer) {
     fill_rect(fb, Rect::new(58, 104, 684, 1), false);
     draw_text(fb, body_font, "Not configured", 58, 190, false);
     draw_text(fb, meta_font, "Back returns", 58, 448, false);
+    mirror_framebuffer_long_axis(fb);
 }
 
 fn render_chapters_landscape(fb: &mut Framebuffer, shell: &UiShell<'_>) {
@@ -162,6 +169,7 @@ fn render_chapters_landscape(fb: &mut Framebuffer, shell: &UiShell<'_>) {
     let counter = fmt_chapter_counter(selected + 1, shell.chapters.len(), &mut counter);
     draw_text(fb, meta_font, counter, 58, 448, false);
     draw_text(fb, meta_font, "OK opens  Back returns", 516, 448, false);
+    mirror_framebuffer_long_axis(fb);
 }
 
 fn draw_literata_toc_item(

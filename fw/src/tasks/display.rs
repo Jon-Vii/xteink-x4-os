@@ -59,23 +59,6 @@ pub async fn run(mut epd: Epd, mut sd_cs: Output<'static>) {
                     let _ = LIBRARY_EVENTS.try_send(LibraryEvent::Scanned {
                         count: sd_library.count.min(u8::MAX as usize) as u8,
                     });
-                    if let Some(record) = reader_cache::load_app_state(&mut epd, &mut sd_cs) {
-                        if let Some(index) = sd_library.find_entry_by_state(
-                            record.source_hash,
-                            record.source_size,
-                            record.book_id,
-                        ) {
-                            sd_library.set_current_index(index);
-                            let book_id = index as u32 + 2;
-                            let _ = LIBRARY_EVENTS.try_send(LibraryEvent::Restored {
-                                book_id,
-                                chapter: record.chapter.min(u8::MAX as u16) as u8,
-                                page: record.screen,
-                                reading_orientation: record.reading_orientation,
-                                refresh_policy: record.refresh_policy,
-                            });
-                        }
-                    }
                 }
                 if request.view == AppView::Reading && request.book_id >= 2 {
                     let index = request.book_id.saturating_sub(2) as usize;
