@@ -277,7 +277,12 @@ impl ReaderState {
             (AppView::Library, Some(Button::Previous)) => {
                 next.selection = wrap_prev(self.selection, self.library_item_count(ctx));
             }
-            (AppView::Library, Some(Button::Confirm)) => {
+            (AppView::Library, Some(Button::Back)) if self.library_count == 0 => {
+                next.view = AppView::Home;
+                next.selection = 1;
+                next.read_request_pending = false;
+            }
+            (AppView::Library, Some(Button::Confirm | Button::Back)) => {
                 if self.selection < self.library_count {
                     next.book_id = self.selection as u32 + 2;
                     next.view = AppView::Reading;
@@ -294,11 +299,6 @@ impl ReaderState {
                     next.selection = 0;
                     next.read_request_pending = false;
                 }
-            }
-            (AppView::Library, Some(Button::Back)) => {
-                next.view = AppView::Home;
-                next.selection = 1;
-                next.read_request_pending = false;
             }
             (AppView::Reading, Some(Button::Next)) => {
                 if self.book_id >= 2 {
@@ -618,6 +618,15 @@ mod tests {
         let state = press(ReaderState::boot(), Button::Back)
             .apply_library_event(CTX, LibraryEvent::Scanned { count: 2 });
         let state = press(press(state, Button::Next), Button::Confirm);
+        assert_eq!(state.view, AppView::Reading);
+        assert_eq!(state.book_id, 3);
+    }
+
+    #[test]
+    fn library_back_also_opens_sd_book() {
+        let state = press(ReaderState::boot(), Button::Back)
+            .apply_library_event(CTX, LibraryEvent::Scanned { count: 2 });
+        let state = press(press(state, Button::Next), Button::Back);
         assert_eq!(state.view, AppView::Reading);
         assert_eq!(state.book_id, 3);
     }

@@ -142,8 +142,9 @@ fn handle_storage_command(
                 let _ = LIBRARY_EVENTS.try_send(LibraryEvent::Scanned {
                     count: sd_library.count.min(u8::MAX as usize) as u8,
                 });
+            } else {
+                let _ = STORAGE_COMMANDS.try_send(StorageCommand::RefreshCatalog);
             }
-            let _ = STORAGE_COMMANDS.try_send(StorageCommand::RefreshCatalog);
         }
         StorageCommand::RefreshCatalog => {
             crate::library_sd::scan_books(epd, sd_cs, sd_library);

@@ -86,7 +86,7 @@ fn render_library(fb: &mut Framebuffer, shell: &UiShell<'_>) {
         draw_text_truncated(fb, font, entry, x, baseline_y, 620, false);
         baseline_y += 38;
     }
-    draw_text(fb, meta_font, "OK opens  Back returns", 58, 448, false);
+    draw_text(fb, meta_font, "OK / Back opens", 58, 448, false);
     mirror_framebuffer_long_axis(fb);
 }
 
