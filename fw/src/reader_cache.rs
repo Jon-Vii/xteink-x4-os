@@ -1,25 +1,16 @@
 use crate::display_flush::Epd;
-use crate::library_sd::{SdSpiDevice, StaticTime};
+use crate::reader_cache_files;
 use crate::reader_layout;
-use crate::reader_store::{
-    BookLoadStatus, ReaderStore, COVER_BYTES, COVER_HEIGHT, COVER_STRIDE, COVER_WIDTH,
-    MAX_READER_BLOCK_TEXT,
-};
+use crate::reader_store::{BookLoadStatus, ReaderStore, MAX_READER_BLOCK_TEXT};
+use crate::sd_session::{self, SdSessionError};
 use display::font::{literata, FontStyle};
 use embassy_time::Instant;
-use embedded_hal::spi::SpiBus as BlockingSpiBus;
-use embedded_sdmmc::{Directory, File, Mode, SdCard, TimeSource, VolumeIdx, VolumeManager};
+use embedded_sdmmc::{Directory, File, Mode, TimeSource};
 use esp_hal::gpio::Output;
-use esp_hal::prelude::*;
 use hal_ext::nvm::AppStateRecord;
 use heapless::String;
 use proto::book::BookId;
-use proto::cache::{
-    decode_block, decode_page, decode_section_header, encode_block, encode_book_header,
-    encode_page, encode_section_header, encode_spine, encode_toc, BlockRecord, BookCacheHeader,
-    SectionHeader, SpineRecord, TocRecord as CacheTocRecord, BLOCK_RECORD_BYTES, BOOK_HEADER_BYTES,
-    PAGE_RECORD_BYTES, SECTION_HEADER_BYTES, SPINE_RECORD_BYTES, TOC_RECORD_BYTES,
-};
+use proto::cache::BlockRecord;
 use proto::epub::{
     parse_css_text_align, parse_epub2_ncx_to_sink, parse_epub3_nav_to_sink, parse_opf,
     xhtml_blocks_to_sink, CssRules, EpubTocSink, ReadAt, TocError, XhtmlBlockSink, XhtmlError,
@@ -34,14 +25,6 @@ pub(crate) const READER_CONTAINER_SCRATCH: usize = 4096;
 pub(crate) const READER_OPF_SCRATCH: usize = 16_384;
 pub(crate) const READER_CSS_SCRATCH: usize = 8_192;
 pub(crate) const READER_XHTML_SCRATCH: usize = 24_576;
-const CACHE_ROOT_DIR: &str = "XTEINK";
-const CACHE_DIR: &str = "CACHE";
-const CACHE_SECTIONS_DIR: &str = "SECTIONS";
-const CACHE_BOOK_FILE: &str = "BOOK.BIN";
-const CACHE_COVER_FILE: &str = "COVER.BIN";
-const STATE_FILE: &str = "STATE.BIN";
-const COVER_MAGIC: &[u8; 4] = b"X4CV";
-const COVER_VERSION: u8 = 1;
 const COVER_SIDECAR_ENABLED: bool = true;
 
 pub(crate) struct ReaderCacheScratch<'a> {
@@ -152,61 +135,19 @@ pub(crate) fn build_or_load_book_cache(
         return;
     }
 
-    epd.deselect_display();
-    sd_cs.set_high();
-    epd.spi_mut().change_bus_frequency(400_u32.kHz());
-    let startup_clocks = [0xFF; 10];
-    if BlockingSpiBus::write(epd.spi_mut(), &startup_clocks).is_err() {
-        epd.spi_mut().change_bus_frequency(40_u32.MHz());
-        set_preview_error(library, "SPI CLOCKS");
-        library.reader_status = BookLoadStatus::Error;
-        return;
-    }
-
-    let status = 'open: {
-        let spi = SdSpiDevice {
-            spi: epd.spi_mut(),
-            cs: sd_cs,
-            delay: esp_hal::delay::Delay::new(),
-        };
-        let card = SdCard::new(spi, esp_hal::delay::Delay::new());
+    let status = sd_session::with_root(epd, sd_cs, |root| {
         esp_println::println!("epub: card init begin");
-        if let Err(err) = card.num_bytes() {
-            esp_println::println!("epub: card init failed: {:?}", err);
-            set_preview_error(library, "CARD INIT");
-            break 'open BookLoadStatus::Error;
-        }
-        card.spi(|device| device.spi.change_bus_frequency(8_u32.MHz()));
-
-        esp_println::println!("epub: open volume");
-        let volume_mgr: VolumeManager<_, _, 4, 4, 1> = VolumeManager::new(card, StaticTime);
-        let volume = match volume_mgr.open_volume(VolumeIdx(0)) {
-            Ok(volume) => volume,
-            Err(err) => {
-                esp_println::println!("epub: open volume failed: {:?}", err);
-                set_preview_error(library, "VOLUME");
-                break 'open BookLoadStatus::Error;
-            }
-        };
         esp_println::println!("epub: open root");
-        let root = match volume.open_root_dir() {
-            Ok(root) => root,
-            Err(err) => {
-                esp_println::println!("epub: open root failed: {:?}", err);
-                set_preview_error(library, "ROOT");
-                break 'open BookLoadStatus::Error;
-            }
-        };
         let mut open_name = String::<16>::new();
         let mut display_name = String::<64>::new();
         let in_books_dir = library.entries[index].in_books_dir;
         let _ = open_name.push_str(&library.entries[index].open_name);
         let _ = display_name.push_str(&library.entries[index].display_name);
 
-        let load_result = if in_books_dir {
-            match root.open_dir("BOOKS") {
+        if in_books_dir {
+            let load_result = match root.open_dir("BOOKS") {
                 Ok(books) => match books.open_file_in_dir(open_name.as_str(), Mode::ReadOnly) {
-                    Ok(file) => build_or_load_epub_cache_from_file(
+                    Ok(file) => Some(build_or_load_epub_cache_from_file(
                         file,
                         &root,
                         &display_name,
@@ -214,21 +155,23 @@ pub(crate) fn build_or_load_book_cache(
                         target_pages,
                         library,
                         scratch,
-                    ),
+                    )),
                     Err(err) => {
                         esp_println::println!("epub: open file failed: {:?}", err);
-                        break 'open BookLoadStatus::Error;
+                        set_preview_error(library, "FILE");
+                        None
                     }
                 },
                 Err(err) => {
                     esp_println::println!("epub: open /books failed: {:?}", err);
                     set_preview_error(library, "BOOKS DIR");
-                    break 'open BookLoadStatus::Error;
+                    None
                 }
-            }
+            };
+            status_for_load_result(load_result, library)
         } else {
-            match root.open_file_in_dir(open_name.as_str(), Mode::ReadOnly) {
-                Ok(file) => build_or_load_epub_cache_from_file(
+            let load_result = match root.open_file_in_dir(open_name.as_str(), Mode::ReadOnly) {
+                Ok(file) => Some(build_or_load_epub_cache_from_file(
                     file,
                     &root,
                     &display_name,
@@ -236,26 +179,22 @@ pub(crate) fn build_or_load_book_cache(
                     target_pages,
                     library,
                     scratch,
-                ),
+                )),
                 Err(err) => {
                     esp_println::println!("epub: open file failed: {:?}", err);
                     set_preview_error(library, "FILE");
-                    break 'open BookLoadStatus::Error;
+                    None
                 }
-            }
-        };
-
-        match load_result {
-            Ok(()) => BookLoadStatus::Ready,
-            Err(err) => {
-                esp_println::println!("epub: load failed: {:?}", err);
-                set_preview_error_from_error(library, err);
-                BookLoadStatus::Error
-            }
+            };
+            status_for_load_result(load_result, library)
         }
-    };
+    })
+    .unwrap_or_else(|err| {
+        esp_println::println!("epub: session failed: {:?}", err);
+        set_preview_error(library, session_error_label(err));
+        BookLoadStatus::Error
+    });
 
-    epd.spi_mut().change_bus_frequency(40_u32.MHz());
     if matches!(status, BookLoadStatus::Ready | BookLoadStatus::Error) {
         if matches!(status, BookLoadStatus::Ready) {
             library.set_current_index(index);
@@ -267,36 +206,38 @@ pub(crate) fn build_or_load_book_cache(
 }
 
 pub(crate) fn store_app_state(epd: &mut Epd, sd_cs: &mut Output<'static>, record: AppStateRecord) {
-    epd.deselect_display();
-    sd_cs.set_high();
-    epd.spi_mut().change_bus_frequency(400_u32.kHz());
-    let startup_clocks = [0xFF; 10];
-    if BlockingSpiBus::write(epd.spi_mut(), &startup_clocks).is_err() {
-        epd.spi_mut().change_bus_frequency(40_u32.MHz());
-        return;
-    }
-
-    let spi = SdSpiDevice {
-        spi: epd.spi_mut(),
-        cs: sd_cs,
-        delay: esp_hal::delay::Delay::new(),
-    };
-    let card = SdCard::new(spi, esp_hal::delay::Delay::new());
-    if card.num_bytes().is_ok() {
-        card.spi(|device| device.spi.change_bus_frequency(8_u32.MHz()));
-        let volume_mgr: VolumeManager<_, _, 4, 4, 1> = VolumeManager::new(card, StaticTime);
-        if let Ok(volume) = volume_mgr.open_volume(VolumeIdx(0)) {
-            if let Ok(root) = volume.open_root_dir() {
-                let _ = write_state_file(&root, record);
-            }
-        };
-    }
-    epd.spi_mut().change_bus_frequency(40_u32.MHz());
+    let _ = sd_session::with_root(epd, sd_cs, |root| {
+        reader_cache_files::write_state_file(root, record)
+    });
 }
 
 fn set_preview_error(library: &mut ReaderStore, message: &str) {
     library.error.clear();
     let _ = library.error.push_str(message);
+}
+
+fn status_for_load_result(
+    result: Option<Result<(), ReaderCacheError>>,
+    library: &mut ReaderStore,
+) -> BookLoadStatus {
+    match result {
+        Some(Ok(())) => BookLoadStatus::Ready,
+        Some(Err(err)) => {
+            esp_println::println!("epub: load failed: {:?}", err);
+            set_preview_error_from_error(library, err);
+            BookLoadStatus::Error
+        }
+        None => BookLoadStatus::Error,
+    }
+}
+
+fn session_error_label(error: SdSessionError) -> &'static str {
+    match error {
+        SdSessionError::StartupClocks => "SPI CLOCKS",
+        SdSessionError::CardInit => "CARD INIT",
+        SdSessionError::Volume => "VOLUME",
+        SdSessionError::Root => "ROOT",
+    }
 }
 
 fn set_preview_error_from_error(library: &mut ReaderStore, error: ReaderCacheError) {
@@ -375,7 +316,7 @@ where
 {
     let open_started = Instant::now();
     let source_len = file.length();
-    let cache_key = cache_key_for(source_path, source_len);
+    let cache_key = proto::cache::cache_key_for(source_path, source_len);
     library.cache_key.clear();
     let _ = library.cache_key.push_str(cache_key.as_str());
 
@@ -463,14 +404,17 @@ where
     let mut saw_spine = false;
     let mut section_incomplete = false;
     let start_spine = requested_start_spine(&package, library, requested_chapter);
-    let _ = ensure_cache_dirs(root, cache_key.as_str());
+    let _ = reader_cache_files::ensure_cache_dirs(root, cache_key.as_str());
     if COVER_SIDECAR_ENABLED {
-        load_cover_cache(root, cache_key.as_str(), library);
+        reader_cache_files::load_cover_cache(root, cache_key.as_str(), library);
     }
-    write_book_cache(root, cache_key.as_str(), &package, library);
-    if let Some(cached_pages) =
-        load_section_cache(root, cache_key.as_str(), start_spine as u16, library)
-    {
+    reader_cache_files::write_book_cache(root, cache_key.as_str(), &package, library);
+    if let Some(cached_pages) = reader_cache_files::load_section_cache(
+        root,
+        cache_key.as_str(),
+        start_spine as u16,
+        library,
+    ) {
         if cached_pages >= target_pages {
             reader_layout::rebuild_toc_page_targets(library);
             esp_println::println!(
@@ -546,7 +490,12 @@ where
         library.section_partial = section_incomplete
             || library.page_count >= target_pages
             || library.block_count >= library.blocks.len().saturating_sub(4);
-        write_section_cache(root, cache_key.as_str(), library.cached_spine, library);
+        reader_cache_files::write_section_cache(
+            root,
+            cache_key.as_str(),
+            library.cached_spine,
+            library,
+        );
         esp_println::println!(
             "epub: initial cache ready after {} ms ({} page(s), {} block(s), key {})",
             open_started.elapsed().as_millis(),
@@ -691,432 +640,6 @@ fn load_epub_toc<R>(
     } else {
         let _ = parse_epub2_ncx_to_sink(toc_text, &mut sink);
     }
-}
-
-fn ensure_cache_dirs<
-    D,
-    T,
-    const MAX_DIRS: usize,
-    const MAX_FILES: usize,
-    const MAX_VOLUMES: usize,
->(
-    root: &Directory<'_, D, T, MAX_DIRS, MAX_FILES, MAX_VOLUMES>,
-    key: &str,
-) -> Result<(), ()>
-where
-    D: embedded_sdmmc::BlockDevice,
-    T: TimeSource,
-{
-    let xteink = open_or_make_dir(root, CACHE_ROOT_DIR)?;
-    let cache = open_or_make_dir(&xteink, CACHE_DIR)?;
-    let book = open_or_make_dir(&cache, key)?;
-    let _ = open_or_make_dir(&book, CACHE_SECTIONS_DIR)?;
-    Ok(())
-}
-
-fn write_state_file<D, T, const MAX_DIRS: usize, const MAX_FILES: usize, const MAX_VOLUMES: usize>(
-    root: &Directory<'_, D, T, MAX_DIRS, MAX_FILES, MAX_VOLUMES>,
-    record: AppStateRecord,
-) -> Result<(), ()>
-where
-    D: embedded_sdmmc::BlockDevice,
-    T: TimeSource,
-{
-    let xteink = open_or_make_dir(root, CACHE_ROOT_DIR)?;
-    let file = xteink
-        .open_file_in_dir(STATE_FILE, Mode::ReadWriteCreateOrTruncate)
-        .map_err(|_| ())?;
-    file.write(&record.encode()).map_err(|_| ())
-}
-
-fn open_or_make_dir<
-    'a,
-    D,
-    T,
-    const MAX_DIRS: usize,
-    const MAX_FILES: usize,
-    const MAX_VOLUMES: usize,
->(
-    parent: &'a Directory<'_, D, T, MAX_DIRS, MAX_FILES, MAX_VOLUMES>,
-    name: &str,
-) -> Result<Directory<'a, D, T, MAX_DIRS, MAX_FILES, MAX_VOLUMES>, ()>
-where
-    D: embedded_sdmmc::BlockDevice,
-    T: TimeSource,
-{
-    match parent.open_dir(name) {
-        Ok(dir) => Ok(dir),
-        Err(_) => {
-            let _ = parent.make_dir_in_dir(name);
-            parent.open_dir(name).map_err(|_| ())
-        }
-    }
-}
-
-fn write_book_cache<D, T, const MAX_DIRS: usize, const MAX_FILES: usize, const MAX_VOLUMES: usize>(
-    root: &Directory<'_, D, T, MAX_DIRS, MAX_FILES, MAX_VOLUMES>,
-    key: &str,
-    package: &proto::epub::EpubPackage<'_>,
-    library: &ReaderStore,
-) where
-    D: embedded_sdmmc::BlockDevice,
-    T: TimeSource,
-{
-    let Ok(xteink) = root.open_dir(CACHE_ROOT_DIR) else {
-        return;
-    };
-    let Ok(cache) = xteink.open_dir(CACHE_DIR) else {
-        return;
-    };
-    let Ok(book_dir) = cache.open_dir(key) else {
-        return;
-    };
-    let Ok(file) = book_dir.open_file_in_dir(CACHE_BOOK_FILE, Mode::ReadWriteCreateOrTruncate)
-    else {
-        return;
-    };
-    let string_bytes = book_string_bytes(package, library);
-    let header = BookCacheHeader {
-        spine_count: package.spine.len().min(u16::MAX as usize) as u16,
-        toc_count: library.toc_count.min(u16::MAX as usize) as u16,
-        string_bytes,
-    };
-    let mut record = [0u8; TOC_RECORD_BYTES];
-    if encode_book_header(header, &mut record[..BOOK_HEADER_BYTES]).is_err()
-        || file.write(&record[..BOOK_HEADER_BYTES]).is_err()
-    {
-        return;
-    }
-
-    let mut offset = book_meta_string_bytes(package, library);
-    for (spine_index, spine) in package.spine.iter().enumerate() {
-        let href_len = spine.href.len().min(u16::MAX as usize) as u16;
-        let toc_index = library
-            .toc
-            .iter()
-            .take(library.toc_count)
-            .position(|toc| toc.spine_index == spine_index as i16)
-            .map(|index| index as i16)
-            .unwrap_or(-1);
-        let spine_record = SpineRecord {
-            href_offset: offset,
-            href_len,
-            toc_index,
-            byte_size: 0,
-        };
-        if encode_spine(spine_record, &mut record[..SPINE_RECORD_BYTES]).is_err()
-            || file.write(&record[..SPINE_RECORD_BYTES]).is_err()
-        {
-            return;
-        }
-        offset = offset.saturating_add(href_len as u32);
-    }
-
-    for toc in library.toc.iter().take(library.toc_count).copied() {
-        let title_offset = offset;
-        offset = offset.saturating_add(toc.title_len as u32);
-        let href_offset = offset;
-        offset = offset.saturating_add(toc.href_len as u32);
-        let cache_toc = CacheTocRecord {
-            title_offset,
-            title_len: toc.title_len,
-            href_offset,
-            href_len: toc.href_len,
-            anchor_offset: 0,
-            anchor_len: 0,
-            level: toc.level,
-            spine_index: toc.spine_index,
-        };
-        if encode_toc(cache_toc, &mut record[..TOC_RECORD_BYTES]).is_err()
-            || file.write(&record[..TOC_RECORD_BYTES]).is_err()
-        {
-            return;
-        }
-    }
-
-    let _ = file.write(package.meta.title.as_bytes());
-    let _ = file.write(&[0]);
-    let _ = file.write(package.meta.author.as_bytes());
-    let _ = file.write(&[0]);
-    let _ = file.write(package.meta.source_path.as_bytes());
-    let _ = file.write(&[0]);
-    for spine in package.spine.iter() {
-        let _ = file.write(spine.href.as_bytes());
-    }
-    for index in 0..library.toc_count {
-        let _ = file.write(library.toc_title(index).as_bytes());
-        let href = library.toc_href(index);
-        let _ = file.write(href.as_bytes());
-    }
-}
-
-fn load_section_cache<
-    D,
-    T,
-    const MAX_DIRS: usize,
-    const MAX_FILES: usize,
-    const MAX_VOLUMES: usize,
->(
-    root: &Directory<'_, D, T, MAX_DIRS, MAX_FILES, MAX_VOLUMES>,
-    key: &str,
-    spine: u16,
-    library: &mut ReaderStore,
-) -> Option<usize>
-where
-    D: embedded_sdmmc::BlockDevice,
-    T: TimeSource,
-{
-    let xteink = root.open_dir(CACHE_ROOT_DIR).ok()?;
-    let cache = xteink.open_dir(CACHE_DIR).ok()?;
-    let book_dir = cache.open_dir(key).ok()?;
-    let sections = book_dir.open_dir(CACHE_SECTIONS_DIR).ok()?;
-    let mut name = String::<12>::new();
-    section_file_name(spine, &mut name);
-    let file = sections
-        .open_file_in_dir(name.as_str(), Mode::ReadOnly)
-        .ok()?;
-    let mut header_bytes = [0u8; SECTION_HEADER_BYTES];
-    read_exact_file(&file, &mut header_bytes).ok()?;
-    let header = decode_section_header(&header_bytes).ok()?;
-    let page_count = header.page_count as usize;
-    let block_count = header.block_count as usize;
-    let text_bytes = header.text_bytes as usize;
-    if page_count > library.pages.len()
-        || block_count > library.blocks.len()
-        || text_bytes > library.text.len()
-    {
-        return None;
-    }
-
-    let mut record_bytes = [0u8; 16];
-    for index in 0..page_count {
-        read_exact_file(&file, &mut record_bytes[..PAGE_RECORD_BYTES]).ok()?;
-        library.pages[index] = decode_page(&record_bytes[..PAGE_RECORD_BYTES]).ok()?;
-        library.page_spine[index] = spine;
-    }
-    for index in 0..block_count {
-        read_exact_file(&file, &mut record_bytes[..BLOCK_RECORD_BYTES]).ok()?;
-        let block = decode_block(&record_bytes[..BLOCK_RECORD_BYTES]).ok()?;
-        library.blocks[index] = block;
-        library.block_styles[index] = display_style_for_proto_style(block.style);
-        library.block_spine[index] = spine;
-    }
-    for index in 0..block_count {
-        let mut flag = [0u8; 1];
-        read_exact_file(&file, &mut flag).ok()?;
-        library.block_paragraph_end[index] = flag[0] != 0;
-    }
-    read_exact_file(&file, &mut library.text[..text_bytes]).ok()?;
-    library.page_count = page_count;
-    library.block_count = block_count;
-    library.text_len = text_bytes;
-    library.cached_spine = spine;
-    library.section_partial = header.partial;
-    Some(page_count)
-}
-
-fn load_cover_cache<D, T, const MAX_DIRS: usize, const MAX_FILES: usize, const MAX_VOLUMES: usize>(
-    root: &Directory<'_, D, T, MAX_DIRS, MAX_FILES, MAX_VOLUMES>,
-    key: &str,
-    library: &mut ReaderStore,
-) where
-    D: embedded_sdmmc::BlockDevice,
-    T: TimeSource,
-{
-    library.clear_cover();
-    let Some((width, height, bits)) = read_cover_cache(root, key, &mut library.cover_bits) else {
-        return;
-    };
-    library.cover_width = width;
-    library.cover_height = height;
-    library.cover_ready = bits == COVER_BYTES;
-}
-
-fn read_cover_cache<D, T, const MAX_DIRS: usize, const MAX_FILES: usize, const MAX_VOLUMES: usize>(
-    root: &Directory<'_, D, T, MAX_DIRS, MAX_FILES, MAX_VOLUMES>,
-    key: &str,
-    out: &mut [u8; COVER_BYTES],
-) -> Option<(u16, u16, usize)>
-where
-    D: embedded_sdmmc::BlockDevice,
-    T: TimeSource,
-{
-    let xteink = root.open_dir(CACHE_ROOT_DIR).ok()?;
-    let cache = xteink.open_dir(CACHE_DIR).ok()?;
-    let book_dir = cache.open_dir(key).ok()?;
-    let file = book_dir
-        .open_file_in_dir(CACHE_COVER_FILE, Mode::ReadOnly)
-        .ok()?;
-    let mut header = [0u8; 12];
-    read_exact_file(&file, &mut header).ok()?;
-    if &header[..4] != COVER_MAGIC || header[4] != COVER_VERSION {
-        return None;
-    }
-    let width = u16::from_le_bytes([header[5], header[6]]);
-    let height = u16::from_le_bytes([header[7], header[8]]);
-    let stride = u16::from_le_bytes([header[9], header[10]]);
-    let flags = header[11];
-    if width as usize != COVER_WIDTH
-        || height as usize != COVER_HEIGHT
-        || stride as usize != COVER_STRIDE
-        || flags != 0
-    {
-        return None;
-    }
-    read_exact_file(&file, out).ok()?;
-    Some((width, height, COVER_BYTES))
-}
-
-fn book_string_bytes(package: &proto::epub::EpubPackage<'_>, library: &ReaderStore) -> u32 {
-    let mut total = book_meta_string_bytes(package, library);
-    for spine in package.spine.iter() {
-        total = total.saturating_add(spine.href.len().min(u16::MAX as usize) as u32);
-    }
-    for index in 0..library.toc_count {
-        total = total.saturating_add(library.toc_title(index).len().min(u16::MAX as usize) as u32);
-        total = total.saturating_add(library.toc_href(index).len().min(u16::MAX as usize) as u32);
-    }
-    total
-}
-
-fn book_meta_string_bytes(package: &proto::epub::EpubPackage<'_>, _library: &ReaderStore) -> u32 {
-    package.meta.title.len().saturating_add(1) as u32
-        + package.meta.author.len().saturating_add(1) as u32
-        + package.meta.source_path.len().saturating_add(1) as u32
-}
-
-fn write_section_cache<
-    D,
-    T,
-    const MAX_DIRS: usize,
-    const MAX_FILES: usize,
-    const MAX_VOLUMES: usize,
->(
-    root: &Directory<'_, D, T, MAX_DIRS, MAX_FILES, MAX_VOLUMES>,
-    key: &str,
-    spine: u16,
-    library: &ReaderStore,
-) where
-    D: embedded_sdmmc::BlockDevice,
-    T: TimeSource,
-{
-    let Ok(xteink) = root.open_dir(CACHE_ROOT_DIR) else {
-        return;
-    };
-    let Ok(cache) = xteink.open_dir(CACHE_DIR) else {
-        return;
-    };
-    let Ok(book_dir) = cache.open_dir(key) else {
-        return;
-    };
-    let Ok(sections) = book_dir.open_dir(CACHE_SECTIONS_DIR) else {
-        return;
-    };
-    let mut name = String::<12>::new();
-    section_file_name(spine, &mut name);
-    let Ok(file) = sections.open_file_in_dir(name.as_str(), Mode::ReadWriteCreateOrTruncate) else {
-        return;
-    };
-    let header = SectionHeader {
-        page_count: library.page_count.min(u16::MAX as usize) as u16,
-        block_count: library.block_count.min(u16::MAX as usize) as u16,
-        line_count: 0,
-        word_count: 0,
-        text_bytes: library.text_len.min(u32::MAX as usize) as u32,
-        viewport_width: 800,
-        viewport_height: 480,
-        font_config: 1,
-        bytes_consumed: 0,
-        total_bytes: 0,
-        partial: library.section_partial,
-    };
-    let mut bytes = [0u8; SECTION_HEADER_BYTES];
-    if encode_section_header(header, &mut bytes).is_err() || file.write(&bytes).is_err() {
-        return;
-    }
-    let mut record = [0u8; 16];
-    for page in library.pages.iter().take(library.page_count) {
-        if encode_page(*page, &mut record[..PAGE_RECORD_BYTES]).is_err()
-            || file.write(&record[..PAGE_RECORD_BYTES]).is_err()
-        {
-            return;
-        }
-    }
-    for block in library.blocks.iter().take(library.block_count) {
-        if encode_block(*block, &mut record[..BLOCK_RECORD_BYTES]).is_err()
-            || file.write(&record[..BLOCK_RECORD_BYTES]).is_err()
-        {
-            return;
-        }
-    }
-    for flag in library
-        .block_paragraph_end
-        .iter()
-        .take(library.block_count)
-        .copied()
-    {
-        if file.write(&[flag as u8]).is_err() {
-            return;
-        }
-    }
-    let _ = file.write(&library.text[..library.text_len]);
-}
-
-fn read_exact_file<D, T, const MAX_DIRS: usize, const MAX_FILES: usize, const MAX_VOLUMES: usize>(
-    file: &File<'_, D, T, MAX_DIRS, MAX_FILES, MAX_VOLUMES>,
-    mut out: &mut [u8],
-) -> Result<(), ()>
-where
-    D: embedded_sdmmc::BlockDevice,
-    T: TimeSource,
-{
-    while !out.is_empty() {
-        let read = file.read(out).map_err(|_| ())?;
-        if read == 0 {
-            return Err(());
-        }
-        let tmp = out;
-        out = &mut tmp[read..];
-    }
-    Ok(())
-}
-
-fn cache_key_for(source_path: &str, source_len: u32) -> String<8> {
-    let mut hash = 0x811c_9dc5u32;
-    for byte in source_path.bytes().chain(source_len.to_le_bytes()) {
-        hash ^= byte as u32;
-        hash = hash.wrapping_mul(0x0100_0193);
-    }
-    let mut out = String::<8>::new();
-    let _ = out.push('E');
-    push_hex(&mut out, hash, 7);
-    out
-}
-
-fn section_file_name(spine: u16, out: &mut String<12>) {
-    out.clear();
-    let _ = out.push('S');
-    push_dec3(out, spine);
-    let _ = out.push_str(".BIN");
-}
-
-fn push_hex<const N: usize>(out: &mut String<N>, value: u32, digits: u8) {
-    for shift in (0..digits).rev() {
-        let nibble = ((value >> (shift * 4)) & 0x0F) as u8;
-        let ch = if nibble < 10 {
-            b'0' + nibble
-        } else {
-            b'A' + nibble - 10
-        };
-        let _ = out.push(ch as char);
-    }
-}
-
-fn push_dec3<const N: usize>(out: &mut String<N>, value: u16) {
-    let value = value.min(999);
-    let _ = out.push((b'0' + ((value / 100) % 10) as u8) as char);
-    let _ = out.push((b'0' + ((value / 10) % 10) as u8) as char);
-    let _ = out.push((b'0' + (value % 10) as u8) as char);
 }
 
 struct SdFileReadAt<
@@ -1265,15 +788,6 @@ fn preview_style_for_proto_style(style: proto::text::FontStyle, role: TextRole) 
                 FontStyle::Regular
             }
         }
-    }
-}
-
-fn display_style_for_proto_style(style: proto::text::FontStyle) -> FontStyle {
-    match style {
-        proto::text::FontStyle::BoldItalic => FontStyle::BoldItalic,
-        proto::text::FontStyle::Bold => FontStyle::Bold,
-        proto::text::FontStyle::Italic => FontStyle::Italic,
-        proto::text::FontStyle::Regular => FontStyle::Regular,
     }
 }
 

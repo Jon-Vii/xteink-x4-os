@@ -176,7 +176,7 @@ fn handle_storage_command(
         StorageCommand::LoadCatalogCache => {
             if crate::library_sd::load_catalog_cache(epd, sd_cs, sd_library) {
                 let _ = LIBRARY_EVENTS.try_send(LibraryEvent::Scanned {
-                    count: sd_library.count.min(u8::MAX as usize) as u8,
+                    count: sd_library.catalog_count_u8(),
                 });
             } else {
                 let _ = STORAGE_COMMANDS.try_send(StorageCommand::RefreshCatalog);
@@ -185,7 +185,7 @@ fn handle_storage_command(
         StorageCommand::RefreshCatalog => {
             crate::library_sd::scan_books(epd, sd_cs, sd_library);
             let _ = LIBRARY_EVENTS.try_send(LibraryEvent::Scanned {
-                count: sd_library.count.min(u8::MAX as usize) as u8,
+                count: sd_library.catalog_count_u8(),
             });
         }
         StorageCommand::OpenBook {
@@ -220,13 +220,13 @@ fn handle_storage_command(
             );
             let _ = LIBRARY_EVENTS.try_send(LibraryEvent::Loaded {
                 book_id,
-                pages: advertised_page_count(sd_library),
+                pages: sd_library.advertised_page_count(),
                 chapters: sd_library.chapter_count_for_ui(),
             });
             esp_println::println!(
                 "storage: open complete status={:?} pages={} chapters={}",
                 sd_library.reader_status,
-                advertised_page_count(sd_library),
+                sd_library.advertised_page_count(),
                 sd_library.chapter_count_for_ui()
             );
             crate::reader_store::publish_chapter_pages(book_id, sd_library);
@@ -251,26 +251,8 @@ fn handle_storage_command(
     }
 }
 
-fn advertised_page_count(library: &ReaderStore) -> u32 {
-    let cached = library.page_count.max(1) as u32;
-    if library.section_partial {
-        cached.saturating_add(1)
-    } else {
-        cached
-    }
-}
-
 fn source_identity(library: &ReaderStore, book_id: u32) -> (u32, u32) {
-    let Some(index) = book_id.checked_sub(2).map(|index| index as usize) else {
-        return (0, 0);
-    };
-    if index >= library.count {
-        return (0, 0);
-    }
-    let Some(entry) = library.entries.get(index) else {
-        return (0, 0);
-    };
-    (entry.source_hash, entry.byte_size)
+    library.source_identity(book_id)
 }
 
 fn needs_clean_selection_refresh(

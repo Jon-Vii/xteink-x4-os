@@ -70,8 +70,10 @@ pub mod catalog;
 mod display_flush;
 mod library_sd;
 mod reader_cache;
+mod reader_cache_files;
 mod reader_layout;
 mod reader_store;
+mod sd_session;
 pub mod tasks;
 mod views;
 

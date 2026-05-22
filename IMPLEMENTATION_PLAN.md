@@ -81,8 +81,10 @@ Current code status:
 - `proto::cache` defines bounded binary cache records for book, TOC, section,
   page, line, word, and block data.
 - Firmware Files/Home/Reading now consume the shared catalog/cache model through
-  the refactored `ReaderStore`. The current in-flash demo book remains a
-  fallback source while SD EPUB loading is hardened.
+  the refactored `ReaderStore`. Rendering and display-task coordination use
+  ReaderStore query methods for catalog entries, active-book labels, selected
+  cover data, advertised page counts, and source identity. The current in-flash
+  demo book remains a fallback source while SD EPUB loading is hardened.
 - The selected-book preview path has been replaced by `build_or_load_book_cache`.
   First open writes `/XTEINK/CACHE/E<hash>/BOOK.BIN`, builds the requested
   section into `/XTEINK/CACHE/E<hash>/SECTIONS/SNNN.BIN`, and renders from those
@@ -113,13 +115,19 @@ Current code status:
   GPIO7, SD CS GPIO12. `embedded-sdmmc` is present with default features
   disabled.
 - Render is side-effect free. `DisplayCommand::Render` only draws the current
-  `ReaderStore` snapshot and flushes the panel. SD discovery, EPUB cache
-  construction, and progress writes run only through explicit `StorageCommand`s
-  after the visible render settles.
+  `ReaderStore` snapshot and flushes the panel. Rendering and task coordination
+  read catalog, active-book, cover, TOC, page-count, and source-identity data
+  through ReaderStore query methods rather than reassembling its parallel arrays
+  directly. SD discovery, EPUB cache construction, and progress writes run only
+  through explicit `StorageCommand`s after the visible render settles.
+- Firmware SD/FAT work now goes through `fw::sd_session`, which owns the shared
+  SPI card-mount/root-open/restore-speed ceremony. EPUB cache file persistence
+  lives in `fw::reader_cache_files`, leaving `fw::reader_cache` focused on the
+  EPUB-to-section-cache pipeline.
 - The board I/O/display task remains the single runtime coordinator for
-  serialized EPD and SD transactions, while SD discovery, EPUB cache
-  construction, reader layout, view drawing, and EPD flushing now live in deeper
-  `fw` modules.
+  serialized EPD and SD transactions, while SD sessions, SD discovery, cache
+  file I/O, EPUB cache construction, reader layout, view drawing, and EPD
+  flushing now live in deeper `fw` modules.
 - Files is instant and catalog-backed. `/XTEINK/CATALOG.BIN` stores a flat fixed
   record list of discovered EPUBs. Firmware may show “Library unavailable” while
   no catalog snapshot exists; it shows “No books available” only after a

@@ -1,7 +1,16 @@
 use crate::text::{FontStyle, TextAlign, TextRole};
+use heapless::String;
 
 pub const CACHE_MAGIC: u32 = 0x5834_5244; // X4RD
 pub const CACHE_VERSION: u16 = 1;
+pub const CACHE_ROOT_DIR: &str = "XTEINK";
+pub const CACHE_DIR: &str = "CACHE";
+pub const CACHE_SECTIONS_DIR: &str = "SECTIONS";
+pub const CACHE_BOOK_FILE: &str = "BOOK.BIN";
+pub const CACHE_COVER_FILE: &str = "COVER.BIN";
+pub const CACHE_STATE_FILE: &str = "STATE.BIN";
+pub const CACHE_KEY_BYTES: usize = 8;
+pub const CACHE_SECTION_FILE_BYTES: usize = 8;
 pub const BOOK_HEADER_BYTES: usize = 16;
 pub const SPINE_RECORD_BYTES: usize = 12;
 pub const TOC_RECORD_BYTES: usize = 24;
@@ -11,6 +20,13 @@ pub const PAGE_RECORD_BYTES: usize = 4;
 pub const LINE_RECORD_BYTES: usize = 12;
 pub const WORD_RECORD_BYTES: usize = 12;
 pub const BLOCK_RECORD_BYTES: usize = 12;
+pub const COVER_MAGIC: &[u8; 4] = b"X4CV";
+pub const COVER_VERSION: u8 = 1;
+pub const COVER_HEADER_BYTES: usize = 12;
+pub const COVER_WIDTH: usize = 202;
+pub const COVER_HEIGHT: usize = 303;
+pub const COVER_STRIDE: usize = COVER_WIDTH.div_ceil(8);
+pub const COVER_BYTES: usize = COVER_STRIDE * COVER_HEIGHT;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CacheError {
@@ -110,6 +126,23 @@ pub struct BlockRecord {
     pub align: TextAlign,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CoverCacheHeader {
+    pub width: u16,
+    pub height: u16,
+    pub stride: u16,
+}
+
+impl CoverCacheHeader {
+    pub const fn x4_dock_clean() -> Self {
+        Self {
+            width: COVER_WIDTH as u16,
+            height: COVER_HEIGHT as u16,
+            stride: COVER_STRIDE as u16,
+        }
+    }
+}
+
 pub fn book_cache_size(header: BookCacheHeader) -> usize {
     BOOK_HEADER_BYTES
         + header.spine_count as usize * SPINE_RECORD_BYTES
@@ -131,6 +164,25 @@ pub fn section_cache_size(header: SectionHeader) -> usize {
         + header.line_count as usize * LINE_RECORD_BYTES
         + header.word_count as usize * WORD_RECORD_BYTES
         + header.text_bytes as usize
+}
+
+pub fn cache_key_for(source_path: &str, source_len: u32) -> String<CACHE_KEY_BYTES> {
+    let mut hash = 0x811c_9dc5u32;
+    for byte in source_path.bytes().chain(source_len.to_le_bytes()) {
+        hash ^= byte as u32;
+        hash = hash.wrapping_mul(0x0100_0193);
+    }
+    let mut out = String::<CACHE_KEY_BYTES>::new();
+    let _ = out.push('E');
+    push_hex(&mut out, hash & 0x0FFF_FFFF, 7);
+    out
+}
+
+pub fn section_file_name<const N: usize>(spine: u16, out: &mut String<N>) {
+    out.clear();
+    let _ = out.push('S');
+    push_dec3(out, spine);
+    let _ = out.push_str(".BIN");
 }
 
 pub fn encode_book_header(header: BookCacheHeader, out: &mut [u8]) -> Result<usize, CacheError> {
@@ -374,6 +426,39 @@ pub fn decode_block(input: &[u8]) -> Result<BlockRecord, CacheError> {
     })
 }
 
+pub fn encode_cover_header(header: CoverCacheHeader, out: &mut [u8]) -> Result<usize, CacheError> {
+    require(out, COVER_HEADER_BYTES)?;
+    out[..4].copy_from_slice(COVER_MAGIC);
+    out[4] = COVER_VERSION;
+    write_u16(out, 5, header.width);
+    write_u16(out, 7, header.height);
+    write_u16(out, 9, header.stride);
+    out[11] = 0;
+    Ok(COVER_HEADER_BYTES)
+}
+
+pub fn decode_cover_header(input: &[u8]) -> Result<CoverCacheHeader, CacheError> {
+    require(input, COVER_HEADER_BYTES)?;
+    if &input[..4] != COVER_MAGIC {
+        return Err(CacheError::BadMagic);
+    }
+    if input[4] != COVER_VERSION {
+        return Err(CacheError::BadVersion);
+    }
+    if input[11] != 0 {
+        return Err(CacheError::BadLength);
+    }
+    let header = CoverCacheHeader {
+        width: read_u16(input, 5)?,
+        height: read_u16(input, 7)?,
+        stride: read_u16(input, 9)?,
+    };
+    if header != CoverCacheHeader::x4_dock_clean() {
+        return Err(CacheError::BadLength);
+    }
+    Ok(header)
+}
+
 fn require(slice: &[u8], len: usize) -> Result<(), CacheError> {
     if slice.len() < len {
         Err(CacheError::BufferTooSmall)
@@ -411,6 +496,25 @@ fn write_i16(out: &mut [u8], offset: usize, value: i16) {
 
 fn write_u32(out: &mut [u8], offset: usize, value: u32) {
     out[offset..offset + 4].copy_from_slice(&value.to_le_bytes());
+}
+
+fn push_hex<const N: usize>(out: &mut String<N>, value: u32, digits: u8) {
+    for shift in (0..digits).rev() {
+        let nibble = ((value >> (shift * 4)) & 0x0F) as u8;
+        let ch = if nibble < 10 {
+            b'0' + nibble
+        } else {
+            b'A' + nibble - 10
+        };
+        let _ = out.push(ch as char);
+    }
+}
+
+fn push_dec3<const N: usize>(out: &mut String<N>, value: u16) {
+    let value = value.min(999);
+    let _ = out.push((b'0' + ((value / 100) % 10) as u8) as char);
+    let _ = out.push((b'0' + ((value / 10) % 10) as u8) as char);
+    let _ = out.push((b'0' + (value % 10) as u8) as char);
 }
 
 fn role_byte(role: TextRole) -> u8 {
@@ -659,5 +763,41 @@ mod tests {
                 + WORD_RECORD_BYTES * 2
                 + 13
         );
+    }
+
+    #[test]
+    fn artifact_names_and_cache_key_are_stable() {
+        assert_eq!(CACHE_ROOT_DIR, "XTEINK");
+        assert_eq!(CACHE_DIR, "CACHE");
+        assert_eq!(CACHE_SECTIONS_DIR, "SECTIONS");
+        assert_eq!(CACHE_BOOK_FILE, "BOOK.BIN");
+        assert_eq!(CACHE_COVER_FILE, "COVER.BIN");
+        assert_eq!(CACHE_STATE_FILE, "STATE.BIN");
+        assert_eq!(
+            cache_key_for("/books/Book.epub", 12_345).as_str(),
+            "EEE2AC55"
+        );
+
+        let mut name = String::<CACHE_SECTION_FILE_BYTES>::new();
+        section_file_name(7, &mut name);
+        assert_eq!(name.as_str(), "S007.BIN");
+        section_file_name(1234, &mut name);
+        assert_eq!(name.as_str(), "S999.BIN");
+    }
+
+    #[test]
+    fn cover_cache_header_round_trips_and_validates_shape() {
+        let header = CoverCacheHeader::x4_dock_clean();
+        let mut bytes = [0u8; COVER_HEADER_BYTES];
+        encode_cover_header(header, &mut bytes).expect("cover header encodes");
+
+        assert_eq!(decode_cover_header(&bytes).unwrap(), header);
+        assert_eq!(COVER_BYTES, 7878);
+
+        bytes[0] = b'?';
+        assert_eq!(decode_cover_header(&bytes), Err(CacheError::BadMagic));
+        bytes[0] = b'X';
+        bytes[9] = 1;
+        assert_eq!(decode_cover_header(&bytes), Err(CacheError::BadLength));
     }
 }

@@ -1,7 +1,5 @@
 use crate::reader_layout::{self, READER_LEFT_X, READER_RIGHT_X};
-use crate::reader_store::{
-    BookLoadStatus, LibraryScanStatus, ReaderStore, COVER_STRIDE, MAX_LIBRARY_BOOKS,
-};
+use crate::reader_store::{BookLoadStatus, LibraryScanStatus, ReaderStore, MAX_LIBRARY_BOOKS};
 use crate::{catalog, AppView, RenderRequest};
 use display::fb::Framebuffer;
 use display::font::literata;
@@ -52,35 +50,32 @@ fn ui_model<'a>(
     library_entries: &'a mut [&'a str; MAX_LIBRARY_BOOKS],
     chapters: &'a mut [UiTocItem<'a>; MAX_UI_CHAPTERS],
 ) -> UiRenderModel<'a> {
-    let library_count = sd_library.count.min(library_entries.len());
-    for (index, entry) in sd_library.entries.iter().take(library_count).enumerate() {
+    let library_count = sd_library.catalog_count().min(library_entries.len());
+    for (index, entry) in sd_library
+        .catalog_entries()
+        .iter()
+        .take(library_count)
+        .enumerate()
+    {
         library_entries[index] = entry.display_name.as_str();
     }
     let chapter_count = fill_chapters(chapters, request, sd_library);
 
     let fallback_book = catalog::active_book(request.book_id);
-    let (title, author) = active_book_labels(
-        request,
-        sd_library,
-        fallback_book.title,
-        fallback_book.author,
-    );
+    let (title, author) =
+        sd_library.active_book_labels(request.book_id, fallback_book.title, fallback_book.author);
 
     UiRenderModel {
         active_book: UiBook {
             title,
             author,
             progress_permille: book_progress_permille(request),
-            cover: if request.book_id >= 2
-                && sd_library.current_index
-                    == request.book_id.checked_sub(2).map(|index| index as usize)
-                && sd_library.cover_ready
-            {
+            cover: if let Some(cover) = sd_library.selected_cover(request.book_id) {
                 Some(UiCover {
-                    width: sd_library.cover_width,
-                    height: sd_library.cover_height,
-                    stride: COVER_STRIDE as u16,
-                    bits: &sd_library.cover_bits,
+                    width: cover.width,
+                    height: cover.height,
+                    stride: cover.stride,
+                    bits: cover.bits,
                 })
             } else {
                 None
@@ -92,50 +87,20 @@ fn ui_model<'a>(
     }
 }
 
-fn active_book_labels<'a>(
-    request: RenderRequest,
-    sd_library: &'a ReaderStore,
-    fallback_title: &'a str,
-    fallback_author: &'a str,
-) -> (&'a str, &'a str) {
-    if request.book_id < 2 {
-        return (fallback_title, fallback_author);
-    }
-    if sd_library.reader_status == BookLoadStatus::Ready
-        && sd_library.loaded_index == request.book_id.checked_sub(2).map(|index| index as usize)
-    {
-        let title = if sd_library.title.is_empty() {
-            fallback_title
-        } else {
-            sd_library.title.as_str()
-        };
-        let author = if sd_library.author.is_empty() {
-            fallback_author
-        } else {
-            sd_library.author.as_str()
-        };
-        return (title, author);
-    }
-    request
-        .book_id
-        .checked_sub(2)
-        .and_then(|index| sd_library.entries.get(index as usize))
-        .map(|entry| (entry.display_name.as_str(), ""))
-        .unwrap_or((fallback_title, fallback_author))
-}
-
 fn fill_chapters<'a>(
     chapters: &mut [UiTocItem<'a>; MAX_UI_CHAPTERS],
     request: RenderRequest,
     sd_library: &'a ReaderStore,
 ) -> usize {
-    if request.book_id >= 2 && sd_library.toc_count > 0 {
-        let count = sd_library.toc_count.min(chapters.len());
+    if request.book_id >= 2 && sd_library.toc_count() > 0 {
+        let count = sd_library.toc_count().min(chapters.len());
         for (index, item) in chapters.iter_mut().take(count).enumerate() {
-            *item = UiTocItem {
-                title: sd_library.toc_title(index),
-                level: sd_library.toc[index].level.max(1),
-            };
+            if let Some(toc_item) = sd_library.toc_item(index) {
+                *item = UiTocItem {
+                    title: toc_item.title,
+                    level: toc_item.level,
+                };
+            }
         }
         return count;
     }
@@ -163,13 +128,13 @@ fn ui_library_status(status: LibraryScanStatus) -> UiLibraryStatus {
 }
 
 fn draw_sd_reader_page(fb: &mut Framebuffer, request: RenderRequest, sd_library: &ReaderStore) {
-    match sd_library.reader_status {
+    match sd_library.reader_status() {
         BookLoadStatus::Empty | BookLoadStatus::Loading => {
             draw_ascii(fb, "OPENING EPUB", 20, 72, false);
         }
         BookLoadStatus::Error => {
             draw_ascii(fb, "COULD NOT OPEN EPUB", 20, 72, false);
-            draw_ascii(fb, &sd_library.error, 20, 104, false);
+            draw_ascii(fb, sd_library.reader_error(), 20, 104, false);
         }
         BookLoadStatus::Ready => {
             let page_top = 22i16;
@@ -182,14 +147,15 @@ fn draw_sd_reader_page(fb: &mut Framebuffer, request: RenderRequest, sd_library:
 
             for offset in 0..page.block_count as usize {
                 let index = page.first_block as usize + offset;
-                let Some(record) = sd_library.blocks.get(index).copied() else {
+                let Some(record) = sd_library.block_record(index) else {
                     break;
                 };
                 let role = record.role;
                 let align = record.align;
                 let text = sd_library.block_text(index);
                 let advance = reader_layout::line_advance_for(role);
-                let font = literata(sd_library.block_styles[index]);
+                let style = sd_library.block_style(index);
+                let font = literata(style);
                 if y < page_top {
                     break;
                 }
@@ -198,13 +164,7 @@ fn draw_sd_reader_page(fb: &mut Framebuffer, request: RenderRequest, sd_library:
                     TextAlign::Left => {
                         let x = reader_layout::reader_x_for(role);
                         if record.line_count == 1 {
-                            reader_layout::draw_styled_line(
-                                fb,
-                                text,
-                                x,
-                                y,
-                                sd_library.block_styles[index],
-                            );
+                            reader_layout::draw_styled_line(fb, text, x, y, style);
                         } else {
                             reader_layout::draw_wrapped_literata(
                                 fb,
@@ -220,13 +180,7 @@ fn draw_sd_reader_page(fb: &mut Framebuffer, request: RenderRequest, sd_library:
                     TextAlign::Justify => {
                         let x = reader_layout::reader_x_for(role);
                         if record.line_count == 1 {
-                            reader_layout::draw_styled_line(
-                                fb,
-                                text,
-                                x,
-                                y,
-                                sd_library.block_styles[index],
-                            );
+                            reader_layout::draw_styled_line(fb, text, x, y, style);
                         } else {
                             reader_layout::draw_justified_wrapped_literata(
                                 fb,
@@ -244,13 +198,7 @@ fn draw_sd_reader_page(fb: &mut Framebuffer, request: RenderRequest, sd_library:
                             let width = reader_layout::styled_text_ink_width(text, font)
                                 .min(READER_RIGHT_X - READER_LEFT_X);
                             let x = ((WIDTH as i16 - width) / 2).max(READER_LEFT_X);
-                            reader_layout::draw_styled_line(
-                                fb,
-                                text,
-                                x,
-                                y,
-                                sd_library.block_styles[index],
-                            );
+                            reader_layout::draw_styled_line(fb, text, x, y, style);
                         } else {
                             reader_layout::draw_centered_wrapped_literata(
                                 fb,

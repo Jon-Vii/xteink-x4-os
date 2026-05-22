@@ -1,7 +1,10 @@
 use crate::{LibraryEvent, LIBRARY_EVENTS};
 use display::font::FontStyle;
 use heapless::String;
-use proto::cache::{BlockRecord, PageRecord, TocRecord};
+use proto::cache::{
+    BlockRecord, PageRecord, TocRecord, CACHE_KEY_BYTES, COVER_BYTES, COVER_HEIGHT, COVER_STRIDE,
+    COVER_WIDTH,
+};
 use proto::text::{TextAlign, TextRole};
 
 pub(crate) const MAX_LIBRARY_BOOKS: usize = 8;
@@ -11,11 +14,6 @@ pub(crate) const MAX_READER_BLOCKS: usize = 384;
 pub(crate) const MAX_READER_PAGES: usize = 96;
 pub(crate) const MAX_READER_TEXT_BYTES: usize = 16_384;
 pub(crate) const MAX_READER_BLOCK_TEXT: usize = 768;
-pub(crate) const CACHE_KEY_BYTES: usize = 8;
-pub(crate) const COVER_WIDTH: usize = 202;
-pub(crate) const COVER_HEIGHT: usize = 303;
-pub(crate) const COVER_STRIDE: usize = (COVER_WIDTH + 7) / 8;
-pub(crate) const COVER_BYTES: usize = COVER_STRIDE * COVER_HEIGHT;
 pub(crate) const EMPTY_BLOCK_RECORD: BlockRecord = BlockRecord {
     text_offset: 0,
     text_len: 0,
@@ -74,6 +72,18 @@ impl LibraryBookEntry {
             source_hash: 0,
         }
     }
+}
+
+pub(crate) struct ReaderCover<'a> {
+    pub(crate) width: u16,
+    pub(crate) height: u16,
+    pub(crate) stride: u16,
+    pub(crate) bits: &'a [u8; COVER_BYTES],
+}
+
+pub(crate) struct TocItem<'a> {
+    pub(crate) title: &'a str,
+    pub(crate) level: u8,
 }
 
 pub(crate) struct ReaderStore {
@@ -163,6 +173,39 @@ impl ReaderStore {
         self.current_index = None;
     }
 
+    pub(crate) fn catalog_count(&self) -> usize {
+        self.count
+    }
+
+    pub(crate) fn catalog_count_u8(&self) -> u8 {
+        self.count.min(u8::MAX as usize) as u8
+    }
+
+    pub(crate) fn catalog_is_empty(&self) -> bool {
+        self.count == 0
+    }
+
+    pub(crate) fn catalog_entries(&self) -> &[LibraryBookEntry] {
+        &self.entries[..self.count]
+    }
+
+    pub(crate) fn catalog_entry(&self, index: usize) -> Option<&LibraryBookEntry> {
+        self.entries.get(index).filter(|_| index < self.count)
+    }
+
+    pub(crate) fn selected_book_index(book_id: u32) -> Option<usize> {
+        book_id.checked_sub(2).map(|index| index as usize)
+    }
+
+    pub(crate) fn source_identity(&self, book_id: u32) -> (u32, u32) {
+        let Some(entry) =
+            Self::selected_book_index(book_id).and_then(|index| self.catalog_entry(index))
+        else {
+            return (0, 0);
+        };
+        (entry.source_hash, entry.byte_size)
+    }
+
     pub(crate) fn clear_toc(&mut self) {
         self.toc_text_len = 0;
         self.toc_count = 0;
@@ -212,6 +255,29 @@ impl ReaderStore {
         core::str::from_utf8(self.text.get(start..end).unwrap_or(&[])).unwrap_or("")
     }
 
+    pub(crate) fn block_record(&self, index: usize) -> Option<BlockRecord> {
+        self.blocks
+            .get(index)
+            .copied()
+            .filter(|_| index < self.block_count)
+    }
+
+    pub(crate) fn block_style(&self, index: usize) -> FontStyle {
+        self.block_styles
+            .get(index)
+            .copied()
+            .unwrap_or(FontStyle::Regular)
+    }
+
+    pub(crate) fn advertised_page_count(&self) -> u32 {
+        let cached = self.page_count.max(1) as u32;
+        if self.section_partial {
+            cached.saturating_add(1)
+        } else {
+            cached
+        }
+    }
+
     pub(crate) fn toc_title(&self, index: usize) -> &str {
         let Some(record) = self.toc.get(index) else {
             return "";
@@ -228,6 +294,73 @@ impl ReaderStore {
         let start = record.href_offset as usize;
         let end = start.saturating_add(record.href_len as usize);
         core::str::from_utf8(self.toc_text.get(start..end).unwrap_or(&[])).unwrap_or("")
+    }
+
+    pub(crate) fn toc_count(&self) -> usize {
+        self.toc_count
+    }
+
+    pub(crate) fn toc_item(&self, index: usize) -> Option<TocItem<'_>> {
+        if index >= self.toc_count {
+            return None;
+        }
+        Some(TocItem {
+            title: self.toc_title(index),
+            level: self.toc[index].level.max(1),
+        })
+    }
+
+    pub(crate) fn active_book_labels<'a>(
+        &'a self,
+        book_id: u32,
+        fallback_title: &'a str,
+        fallback_author: &'a str,
+    ) -> (&'a str, &'a str) {
+        if book_id < 2 {
+            return (fallback_title, fallback_author);
+        }
+        if self.reader_status == BookLoadStatus::Ready
+            && self.loaded_index == Self::selected_book_index(book_id)
+        {
+            let title = if self.title.is_empty() {
+                fallback_title
+            } else {
+                self.title.as_str()
+            };
+            let author = if self.author.is_empty() {
+                fallback_author
+            } else {
+                self.author.as_str()
+            };
+            return (title, author);
+        }
+        Self::selected_book_index(book_id)
+            .and_then(|index| self.catalog_entry(index))
+            .map(|entry| (entry.display_name.as_str(), ""))
+            .unwrap_or((fallback_title, fallback_author))
+    }
+
+    pub(crate) fn selected_cover(&self, book_id: u32) -> Option<ReaderCover<'_>> {
+        if book_id < 2
+            || self.current_index != Self::selected_book_index(book_id)
+            || !self.cover_ready
+        {
+            return None;
+        }
+        Some(ReaderCover {
+            width: self.cover_width,
+            height: self.cover_height,
+            stride: COVER_STRIDE as u16,
+            bits: &self.cover_bits,
+        })
+    }
+
+    pub(crate) fn reader_status(&self) -> BookLoadStatus {
+        self.reader_status
+    }
+
+    pub(crate) fn reader_error(&self) -> &str {
+        self.error.as_str()
     }
 
     pub(crate) fn push_toc_record(

@@ -78,6 +78,9 @@ Storage is also explicit. Files/Home/Reading transitions enqueue
 FAT, open EPUBs, build caches, or write progress. The board I/O task is still
 the single SPI owner, so display refresh and SD transactions cannot overlap, but
 the user-facing view is always drawn from the latest already-owned snapshot.
+SD/FAT access goes through an SD session: the board I/O task deselects the
+display, prepares the card on the shared SPI bus, opens the FAT root, performs
+one storage action, and restores display-speed SPI before returning to EPD work.
 
 ## Display model
 

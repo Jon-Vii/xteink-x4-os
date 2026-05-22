@@ -7,6 +7,10 @@ use proto::epub::{
     load_epub_package, parse_css_text_align, xhtml_blocks_to_sink, CssRules, EpubPackage,
     SpineItem, XhtmlBlockSink, XhtmlError, ZipArchive, ZipEntry,
 };
+use proto::cache::{
+    cache_key_for, encode_cover_header, CoverCacheHeader, CACHE_COVER_FILE, CACHE_DIR,
+    CACHE_ROOT_DIR, COVER_BYTES, COVER_HEIGHT, COVER_STRIDE, COVER_WIDTH,
+};
 use proto::text::{TextAlign, TextRole};
 use std::env;
 use std::fs::{create_dir_all, read, File};
@@ -24,10 +28,6 @@ const READER_RIGHT_X: i16 = 792;
 const READER_WRAP_SAFETY: i16 = 4;
 const STYLE_MARKER: char = '\u{1b}';
 const MAX_PREVIEW_LINES: usize = 4096;
-const COVER_WIDTH: u16 = 202;
-const COVER_HEIGHT: u16 = 303;
-const COVER_STRIDE: u16 = COVER_WIDTH.div_ceil(8);
-const COVER_BYTES: usize = COVER_STRIDE as usize * COVER_HEIGHT as usize;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args = Args::parse()?;
@@ -138,10 +138,10 @@ fn preview_epub(
         };
         let key = cache_key_for(source_path, bytes.len() as u32);
         let path = sd_root
-            .join("XTEINK")
-            .join("CACHE")
-            .join(key)
-            .join("COVER.BIN");
+            .join(CACHE_ROOT_DIR)
+            .join(CACHE_DIR)
+            .join(key.as_str())
+            .join(CACHE_COVER_FILE);
         write_cover_cache_file(&zip, &package, &path)?;
     }
 
@@ -216,15 +216,6 @@ fn default_device_source_path(epub_path: &Path) -> String {
         .unwrap_or_else(|| String::from("/books/book.epub"))
 }
 
-fn cache_key_for(source_path: &str, source_len: u32) -> String {
-    let mut hash = 0x811c_9dc5u32;
-    for byte in source_path.bytes().chain(source_len.to_le_bytes()) {
-        hash ^= byte as u32;
-        hash = hash.wrapping_mul(0x0100_0193);
-    }
-    format!("E{:07X}", hash & 0x0FFF_FFFF)
-}
-
 fn write_cover_cache_file(
     zip: &ZipArchive<'_>,
     package: &EpubPackage<'_>,
@@ -247,11 +238,11 @@ fn write_cover_cache_file(
         )
         .to_luma8();
     let mut bits = [0u8; COVER_BYTES];
-    for y in 0..COVER_HEIGHT as usize {
-        for x in 0..COVER_WIDTH as usize {
+    for y in 0..COVER_HEIGHT {
+        for x in 0..COVER_WIDTH {
             let luma = gray.get_pixel(x as u32, y as u32)[0];
             if luma < 180 {
-                let index = y * COVER_STRIDE as usize + x / 8;
+                let index = y * COVER_STRIDE + x / 8;
                 bits[index] |= 0x80 >> (x & 7);
             }
         }
@@ -261,12 +252,14 @@ fn write_cover_cache_file(
         create_dir_all(parent)?;
     }
     let mut file = File::create(path)?;
-    file.write_all(b"X4CV")?;
-    file.write_all(&[1])?;
-    file.write_all(&COVER_WIDTH.to_le_bytes())?;
-    file.write_all(&COVER_HEIGHT.to_le_bytes())?;
-    file.write_all(&COVER_STRIDE.to_le_bytes())?;
-    file.write_all(&[0])?;
+    let mut header = [0u8; proto::cache::COVER_HEADER_BYTES];
+    encode_cover_header(CoverCacheHeader::x4_dock_clean(), &mut header).map_err(|err| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("cover header: {err:?}"),
+        )
+    })?;
+    file.write_all(&header)?;
     file.write_all(&bits)?;
     println!("Wrote cover cache to {}", path.display());
     Ok(())
