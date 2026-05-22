@@ -302,7 +302,7 @@ impl Emulator {
         }
         if matches!(
             request.view,
-            app_core::AppView::Library | app_core::AppView::Chapters | app_core::AppView::Settings
+            app_core::AppView::Chapters | app_core::AppView::Settings
         ) && request.selection != self.last_selection
         {
             return display::epd::RefreshMode::Full;

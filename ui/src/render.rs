@@ -82,12 +82,10 @@ fn render_library(fb: &mut Framebuffer, shell: &UiShell<'_>) {
     for (index, entry) in shell.library_entries.iter().take(8).enumerate() {
         let selected = index == shell.selection as usize;
         if selected {
-            fill_rect(fb, Rect::new(46, (baseline_y - 24) as u16, 708, 31), false);
+            fill_rect(fb, Rect::new(56, (baseline_y - 22) as u16, 3, 27), false);
+            draw_text(fb, body_font, ">", 70, baseline_y, false);
         }
-        if selected {
-            draw_text(fb, body_font, ">", 60, baseline_y, true);
-        }
-        draw_text_truncated(fb, body_font, entry, 92, baseline_y, 620, selected);
+        draw_text_truncated(fb, body_font, entry, 98, baseline_y, 620, false);
         baseline_y += 38;
     }
     draw_text(fb, meta_font, "OK opens  Back returns", 58, 448, false);

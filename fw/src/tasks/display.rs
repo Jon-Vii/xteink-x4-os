@@ -137,14 +137,15 @@ fn handle_storage_command(
     init_scratch: impl FnOnce() -> &'static mut ReaderCacheScratch,
 ) {
     match command {
-        StorageCommand::RefreshCatalog => {
-            if sd_library.count == 0
-                && crate::library_sd::load_catalog_cache(epd, sd_cs, sd_library)
-            {
+        StorageCommand::LoadCatalogCache => {
+            if crate::library_sd::load_catalog_cache(epd, sd_cs, sd_library) {
                 let _ = LIBRARY_EVENTS.try_send(LibraryEvent::Scanned {
                     count: sd_library.count.min(u8::MAX as usize) as u8,
                 });
             }
+            let _ = STORAGE_COMMANDS.try_send(StorageCommand::RefreshCatalog);
+        }
+        StorageCommand::RefreshCatalog => {
             crate::library_sd::scan_books(epd, sd_cs, sd_library);
             let _ = LIBRARY_EVENTS.try_send(LibraryEvent::Scanned {
                 count: sd_library.count.min(u8::MAX as usize) as u8,
@@ -232,10 +233,8 @@ fn needs_clean_selection_refresh(
     if request.view != last.view || request.book_id != last.book_id {
         return false;
     }
-    matches!(
-        request.view,
-        AppView::Library | AppView::Chapters | AppView::Settings
-    ) && request.selection != last.selection
+    matches!(request.view, AppView::Chapters | AppView::Settings)
+        && request.selection != last.selection
 }
 
 fn needs_clean_library_refresh(

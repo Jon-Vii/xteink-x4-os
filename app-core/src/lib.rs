@@ -100,6 +100,7 @@ pub enum DisplayCommand {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum StorageCommand {
+    LoadCatalogCache,
     RefreshCatalog,
     OpenBook {
         book_id: u32,

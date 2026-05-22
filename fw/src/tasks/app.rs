@@ -75,7 +75,7 @@ pub async fn run() {
                     rendering = false;
                     if !catalog_refresh_requested {
                         catalog_refresh_requested = true;
-                        let _ = STORAGE_COMMANDS.try_send(StorageCommand::RefreshCatalog);
+                        let _ = STORAGE_COMMANDS.try_send(StorageCommand::LoadCatalogCache);
                     }
                     if let Some(command) = pending_storage.take() {
                         let _ = STORAGE_COMMANDS.try_send(command);
