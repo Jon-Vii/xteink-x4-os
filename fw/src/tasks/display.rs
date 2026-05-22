@@ -6,9 +6,10 @@ use crate::reader_cache::{
 };
 use crate::reader_store::{BookLoadStatus, ReaderStore};
 use crate::{
-    AppView, DisplayCommand, DisplayEvent, LibraryEvent, PowerEvent, RefreshPolicy, StorageCommand,
-    DISPLAY_COMMANDS, DISPLAY_EVENTS, LIBRARY_EVENTS, POWER_EVENTS, STORAGE_COMMANDS,
+    DisplayCommand, DisplayEvent, LibraryEvent, PowerEvent, StorageCommand, DISPLAY_COMMANDS,
+    DISPLAY_EVENTS, LIBRARY_EVENTS, POWER_EVENTS, STORAGE_COMMANDS,
 };
+use app_core::RefreshPlanner;
 use display::epd::RefreshMode;
 use display::fb::Framebuffer;
 use display::BAND_BYTES;
@@ -16,9 +17,6 @@ use embassy_futures::select::{select, Either};
 use esp_hal::gpio::Output;
 use hal_ext::nvm::AppStateRecord;
 use static_cell::ConstStaticCell;
-
-const FAST_REFRESH_ENABLED: bool = true;
-const FULL_REFRESH_INTERVAL: u8 = 8;
 
 #[embassy_executor::task]
 pub async fn run(mut epd: Epd, mut sd_cs: Output<'static>) {
@@ -54,34 +52,25 @@ pub async fn run(mut epd: Epd, mut sd_cs: Output<'static>) {
     display_flush::init_panel(&mut epd).await;
     esp_println::println!("display: init complete");
 
-    let mut screen_on = false;
-    let mut fast_refreshes = 0u8;
+    let mut refresh_planner = RefreshPlanner::new();
     static SD_LIBRARY: static_cell::StaticCell<ReaderStore> = static_cell::StaticCell::new();
     let sd_library = SD_LIBRARY.init_with(ReaderStore::new);
-    let mut last_view: Option<AppView> = None;
-    let mut last_book_id: Option<u32> = None;
-    let mut last_request: Option<crate::RenderRequest> = None;
     loop {
         match select(DISPLAY_COMMANDS.receive(), STORAGE_COMMANDS.receive()).await {
             Either::First(DisplayCommand::Render(request)) => {
-                let content_context_changed =
-                    last_view != Some(request.view) || last_book_id != Some(request.book_id);
+                let content_context_changed = refresh_planner
+                    .last_request()
+                    .map(|last| (last.view, last.book_id))
+                    != Some((request.view, request.book_id));
                 crate::views::render(fb, request, sd_library);
 
-                if !screen_on && last_request.is_none() {
+                if !refresh_planner.screen_on() && refresh_planner.last_request().is_none() {
                     esp_println::println!("display: wake init start");
                     display_flush::init_panel(&mut epd).await;
                     esp_println::println!("display: wake init complete");
                 }
 
-                let mode = if content_context_changed
-                    || needs_clean_selection_refresh(request, last_request)
-                    || needs_clean_library_refresh(request, last_request)
-                {
-                    RefreshMode::Full
-                } else {
-                    refresh_mode(screen_on, fast_refreshes, request.refresh_policy)
-                };
+                let mode = refresh_planner.mode_for(request);
                 if content_context_changed {
                     esp_println::println!(
                         "display: context changed, refresh policy {:?} -> {:?}",
@@ -89,46 +78,41 @@ pub async fn run(mut epd: Epd, mut sd_cs: Output<'static>) {
                         mode
                     );
                 }
-                if display_flush::flush(&mut epd, fb, prev_fb, tx_band, screen_on, mode)
-                    .await
-                    .is_ok()
+                if display_flush::flush(
+                    &mut epd,
+                    fb,
+                    prev_fb,
+                    tx_band,
+                    refresh_planner.screen_on(),
+                    mode,
+                )
+                .await
+                .is_ok()
                 {
-                    screen_on = true;
-                    last_view = Some(request.view);
-                    last_book_id = Some(request.book_id);
-                    if mode == RefreshMode::Fast {
-                        fast_refreshes = fast_refreshes.saturating_add(1);
-                    } else {
-                        fast_refreshes = 0;
-                    }
+                    refresh_planner.record_render(request, mode);
                     prev_fb.copy_from(fb);
                     let _ = DISPLAY_EVENTS.try_send(DisplayEvent::Settled);
                     let _ = POWER_EVENTS.send(PowerEvent::DisplaySettled).await;
                 } else {
                     esp_println::println!("display: SPI transfer failed");
                 }
-                last_request = Some(request);
             }
             Either::First(DisplayCommand::Sleep) => {
-                if let Some(request) = last_request {
+                if let Some(request) = refresh_planner.last_request() {
                     crate::views::render_sleep(fb, request, sd_library);
                     let _ = display_flush::flush(
                         &mut epd,
                         fb,
                         prev_fb,
                         tx_band,
-                        screen_on,
+                        refresh_planner.screen_on(),
                         RefreshMode::Full,
                     )
                     .await;
                     prev_fb.copy_from(fb);
                 }
                 if display_flush::sleep_panel(&mut epd).await.is_ok() {
-                    screen_on = false;
-                    fast_refreshes = 0;
-                    last_view = None;
-                    last_book_id = None;
-                    last_request = None;
+                    refresh_planner.record_sleep();
                     let _ = DISPLAY_EVENTS.try_send(DisplayEvent::Asleep);
                     let _ = POWER_EVENTS.send(PowerEvent::DisplayAsleep).await;
                 } else {
@@ -253,39 +237,4 @@ fn handle_storage_command(
 
 fn source_identity(library: &ReaderStore, book_id: u32) -> (u32, u32) {
     library.source_identity(book_id)
-}
-
-fn needs_clean_selection_refresh(
-    request: crate::RenderRequest,
-    last_request: Option<crate::RenderRequest>,
-) -> bool {
-    let Some(last) = last_request else {
-        return false;
-    };
-    if request.view != last.view || request.book_id != last.book_id {
-        return false;
-    }
-    matches!(request.view, AppView::Chapters | AppView::Settings)
-        && request.selection != last.selection
-}
-
-fn needs_clean_library_refresh(
-    request: crate::RenderRequest,
-    last_request: Option<crate::RenderRequest>,
-) -> bool {
-    let Some(last) = last_request else {
-        return false;
-    };
-    request.view == AppView::Library && request.library_count != last.library_count
-}
-
-fn refresh_mode(screen_on: bool, fast_refreshes: u8, refresh_policy: RefreshPolicy) -> RefreshMode {
-    if !FAST_REFRESH_ENABLED || !screen_on {
-        return RefreshMode::Full;
-    }
-    match refresh_policy {
-        RefreshPolicy::FastOnly | RefreshPolicy::FullOnWake => RefreshMode::Fast,
-        RefreshPolicy::FullEveryTen if fast_refreshes >= FULL_REFRESH_INTERVAL => RefreshMode::Full,
-        RefreshPolicy::FullEveryTen => RefreshMode::Fast,
-    }
 }

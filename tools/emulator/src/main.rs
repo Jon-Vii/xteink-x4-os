@@ -2,7 +2,7 @@ mod panel;
 mod render;
 mod scenario;
 
-use app_core::{Button, InputEvent, LibraryEvent};
+use app_core::{Button, InputEvent, LibraryEvent, RefreshPlanner};
 #[cfg(feature = "gui")]
 use display::{HEIGHT, WIDTH};
 #[cfg(feature = "gui")]
@@ -182,17 +182,12 @@ fn run_gui(args: Args) -> Result<(), Box<dyn std::error::Error>> {
 pub struct Emulator {
     state: app_core::ReaderState,
     ctx: app_core::ReducerContext,
+    refresh_planner: RefreshPlanner,
     panel: PanelModel,
     fb: display::fb::Framebuffer,
-    screen_on: bool,
-    fast_refreshes: u8,
     sleeping: bool,
     _sd_root: Option<PathBuf>,
     library_entries: Vec<String>,
-    last_view: Option<app_core::AppView>,
-    last_book_id: Option<u32>,
-    last_selection: u8,
-    last_library_count: u8,
 }
 
 impl Emulator {
@@ -200,17 +195,12 @@ impl Emulator {
         let mut emu = Self {
             state: app_core::ReaderState::boot(),
             ctx: app_core::ReducerContext::new(1, 4),
+            refresh_planner: RefreshPlanner::new(),
             panel: PanelModel::new(),
             fb: display::fb::Framebuffer::new(),
-            screen_on: false,
-            fast_refreshes: 0,
             sleeping: false,
             _sd_root: sd_root,
             library_entries: Vec::new(),
-            last_view: None,
-            last_book_id: None,
-            last_selection: 0,
-            last_library_count: 0,
         };
         emu.panel.init_sequence().expect("panel init");
         emu.render(app_core::RenderKind::Boot);
@@ -261,25 +251,19 @@ impl Emulator {
     fn render(&mut self, kind: app_core::RenderKind) {
         let request = self.state.render_request(kind);
         crate::render::render_request(&mut self.fb, request, &self.library_entries);
-        let mode = self.refresh_mode(request);
+        let mode = self.refresh_planner.mode_for(request);
         self.panel
             .write_framebuffer_bw(&self.fb)
             .expect("panel framebuffer write");
         self.panel.refresh(mode).expect("panel refresh");
-        self.screen_on = true;
-        self.last_view = Some(request.view);
-        self.last_book_id = Some(request.book_id);
-        self.last_selection = request.selection;
-        self.last_library_count = request.library_count;
-        if mode == display::epd::RefreshMode::Fast {
-            self.fast_refreshes = self.fast_refreshes.saturating_add(1);
-        } else {
-            self.fast_refreshes = 0;
-        }
+        self.refresh_planner.record_render(request, mode);
     }
 
     fn sleep_panel(&mut self) {
-        crate::render::render_sleep(&mut self.fb, self.state.render_request(app_core::RenderKind::Page));
+        crate::render::render_sleep(
+            &mut self.fb,
+            self.state.render_request(app_core::RenderKind::Page),
+        );
         self.panel
             .write_framebuffer_bw(&self.fb)
             .expect("panel sleep framebuffer write");
@@ -287,40 +271,7 @@ impl Emulator {
             .refresh(display::epd::RefreshMode::Full)
             .expect("panel sleep refresh");
         self.panel.deep_sleep().expect("panel deep sleep");
-        self.screen_on = false;
-        self.fast_refreshes = 0;
-        self.last_view = None;
-        self.last_book_id = None;
-    }
-
-    fn refresh_mode(&self, request: app_core::RenderRequest) -> display::epd::RefreshMode {
-        if !self.screen_on
-            || self.last_view != Some(request.view)
-            || self.last_book_id != Some(request.book_id)
-        {
-            return display::epd::RefreshMode::Full;
-        }
-        if matches!(
-            request.view,
-            app_core::AppView::Chapters | app_core::AppView::Settings
-        ) && request.selection != self.last_selection
-        {
-            return display::epd::RefreshMode::Full;
-        }
-        if request.view == app_core::AppView::Library
-            && request.library_count != self.last_library_count
-        {
-            return display::epd::RefreshMode::Full;
-        }
-        match request.refresh_policy {
-            app_core::RefreshPolicy::FastOnly | app_core::RefreshPolicy::FullOnWake => {
-                display::epd::RefreshMode::Fast
-            }
-            app_core::RefreshPolicy::FullEveryTen if self.fast_refreshes >= 8 => {
-                display::epd::RefreshMode::Full
-            }
-            app_core::RefreshPolicy::FullEveryTen => display::epd::RefreshMode::Fast,
-        }
+        self.refresh_planner.record_sleep();
     }
 }
 

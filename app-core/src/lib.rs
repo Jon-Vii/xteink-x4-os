@@ -1,7 +1,7 @@
 #![no_std]
 #![forbid(unsafe_code)]
 
-use display::Rect;
+use display::{epd::RefreshMode, Rect};
 
 pub const SETTINGS_ITEMS: u8 = 3;
 pub const MAX_SD_CHAPTERS: usize = 64;
@@ -78,6 +78,89 @@ pub enum RefreshPolicy {
     FastOnly,
     FullOnWake,
     FullEveryTen,
+}
+
+pub const DEFAULT_FULL_REFRESH_INTERVAL: u8 = 8;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RefreshPlanner {
+    screen_on: bool,
+    fast_refreshes: u8,
+    last_request: Option<RenderRequest>,
+    fast_refresh_enabled: bool,
+    full_refresh_interval: u8,
+}
+
+impl RefreshPlanner {
+    pub const fn new() -> Self {
+        Self {
+            screen_on: false,
+            fast_refreshes: 0,
+            last_request: None,
+            fast_refresh_enabled: true,
+            full_refresh_interval: DEFAULT_FULL_REFRESH_INTERVAL,
+        }
+    }
+
+    pub const fn with_fast_refresh_enabled(mut self, enabled: bool) -> Self {
+        self.fast_refresh_enabled = enabled;
+        self
+    }
+
+    pub const fn screen_on(&self) -> bool {
+        self.screen_on
+    }
+
+    pub const fn last_request(&self) -> Option<RenderRequest> {
+        self.last_request
+    }
+
+    pub fn mode_for(&self, request: RenderRequest) -> RefreshMode {
+        let Some(last) = self.last_request else {
+            return RefreshMode::Full;
+        };
+        if !self.fast_refresh_enabled
+            || !self.screen_on
+            || request.view != last.view
+            || request.book_id != last.book_id
+            || Self::needs_clean_selection_refresh(request, last)
+            || Self::needs_clean_library_refresh(request, last)
+        {
+            return RefreshMode::Full;
+        }
+        match request.refresh_policy {
+            RefreshPolicy::FastOnly | RefreshPolicy::FullOnWake => RefreshMode::Fast,
+            RefreshPolicy::FullEveryTen if self.fast_refreshes >= self.full_refresh_interval => {
+                RefreshMode::Full
+            }
+            RefreshPolicy::FullEveryTen => RefreshMode::Fast,
+        }
+    }
+
+    pub fn record_render(&mut self, request: RenderRequest, mode: RefreshMode) {
+        self.screen_on = true;
+        self.last_request = Some(request);
+        if mode == RefreshMode::Fast {
+            self.fast_refreshes = self.fast_refreshes.saturating_add(1);
+        } else {
+            self.fast_refreshes = 0;
+        }
+    }
+
+    pub fn record_sleep(&mut self) {
+        self.screen_on = false;
+        self.fast_refreshes = 0;
+        self.last_request = None;
+    }
+
+    fn needs_clean_selection_refresh(request: RenderRequest, last: RenderRequest) -> bool {
+        matches!(request.view, AppView::Chapters | AppView::Settings)
+            && request.selection != last.selection
+    }
+
+    fn needs_clean_library_refresh(request: RenderRequest, last: RenderRequest) -> bool {
+        request.view == AppView::Library && request.library_count != last.library_count
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -722,5 +805,42 @@ mod tests {
         assert_eq!(state.page, 12);
         assert_eq!(state.orientation, DisplayOrientation::PortraitButtonsRight);
         assert_eq!(state.refresh_policy, RefreshPolicy::FastOnly);
+    }
+
+    #[test]
+    fn refresh_plan_uses_full_for_context_and_selection_changes() {
+        let mut planner = RefreshPlanner::new();
+        let mut request = ReaderState::boot().render_request(RenderKind::Boot);
+
+        assert_eq!(planner.mode_for(request), RefreshMode::Full);
+        planner.record_render(request, RefreshMode::Full);
+
+        request.kind = RenderKind::Page;
+        assert_eq!(planner.mode_for(request), RefreshMode::Fast);
+
+        request.view = AppView::Settings;
+        assert_eq!(planner.mode_for(request), RefreshMode::Full);
+        planner.record_render(request, RefreshMode::Full);
+
+        request.selection = 1;
+        assert_eq!(planner.mode_for(request), RefreshMode::Full);
+    }
+
+    #[test]
+    fn refresh_plan_counts_fast_refreshes_and_resets_on_sleep() {
+        let mut planner = RefreshPlanner::new();
+        let mut state = ReaderState::boot();
+        state.refresh_policy = RefreshPolicy::FullEveryTen;
+        let request = state.render_request(RenderKind::Page);
+        planner.record_render(request, RefreshMode::Full);
+
+        for _ in 0..DEFAULT_FULL_REFRESH_INTERVAL {
+            assert_eq!(planner.mode_for(request), RefreshMode::Fast);
+            planner.record_render(request, RefreshMode::Fast);
+        }
+        assert_eq!(planner.mode_for(request), RefreshMode::Full);
+
+        planner.record_sleep();
+        assert_eq!(planner.mode_for(request), RefreshMode::Full);
     }
 }
