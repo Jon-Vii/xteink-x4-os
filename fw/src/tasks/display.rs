@@ -51,7 +51,9 @@ pub async fn run(mut epd: Epd, mut sd_cs: Output<'static>) {
                     esp_println::println!("display: wake init complete");
                 }
 
-                let mode = if content_context_changed {
+                let mode = if content_context_changed
+                    || needs_clean_selection_refresh(request, last_request)
+                {
                     RefreshMode::Full
                 } else {
                     refresh_mode(screen_on, fast_refreshes, request.refresh_policy)
@@ -217,6 +219,22 @@ fn source_identity(library: &ReaderStore, book_id: u32) -> (u32, u32) {
         return (0, 0);
     };
     (entry.source_hash, entry.byte_size)
+}
+
+fn needs_clean_selection_refresh(
+    request: crate::RenderRequest,
+    last_request: Option<crate::RenderRequest>,
+) -> bool {
+    let Some(last) = last_request else {
+        return false;
+    };
+    if request.view != last.view || request.book_id != last.book_id {
+        return false;
+    }
+    matches!(
+        request.view,
+        AppView::Library | AppView::Chapters | AppView::Settings
+    ) && request.selection != last.selection
 }
 
 fn refresh_mode(screen_on: bool, fast_refreshes: u8, refresh_policy: RefreshPolicy) -> RefreshMode {

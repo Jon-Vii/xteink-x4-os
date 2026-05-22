@@ -191,6 +191,7 @@ pub struct Emulator {
     library_entries: Vec<String>,
     last_view: Option<app_core::AppView>,
     last_book_id: Option<u32>,
+    last_selection: u8,
 }
 
 impl Emulator {
@@ -207,6 +208,7 @@ impl Emulator {
             library_entries: Vec::new(),
             last_view: None,
             last_book_id: None,
+            last_selection: 0,
         };
         emu.panel.init_sequence().expect("panel init");
         emu.render(app_core::RenderKind::Boot);
@@ -265,6 +267,7 @@ impl Emulator {
         self.screen_on = true;
         self.last_view = Some(request.view);
         self.last_book_id = Some(request.book_id);
+        self.last_selection = request.selection;
         if mode == display::epd::RefreshMode::Fast {
             self.fast_refreshes = self.fast_refreshes.saturating_add(1);
         } else {
@@ -291,6 +294,13 @@ impl Emulator {
         if !self.screen_on
             || self.last_view != Some(request.view)
             || self.last_book_id != Some(request.book_id)
+        {
+            return display::epd::RefreshMode::Full;
+        }
+        if matches!(
+            request.view,
+            app_core::AppView::Library | app_core::AppView::Chapters | app_core::AppView::Settings
+        ) && request.selection != self.last_selection
         {
             return display::epd::RefreshMode::Full;
         }

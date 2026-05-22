@@ -250,6 +250,11 @@ impl ReaderState {
             (_, None) => {}
             (_, Some(Button::Power)) => {}
             (AppView::Home, Some(Button::Back)) => {
+                next.view = AppView::Library;
+                next.selection = 0;
+                next.read_request_pending = false;
+            }
+            (AppView::Home, Some(Button::Confirm)) => {
                 if self.book_id >= 2 {
                     next.view = AppView::Reading;
                     next.selection = self.chapter;
@@ -269,11 +274,6 @@ impl ReaderState {
                     next.selection = 0;
                     next.read_request_pending = false;
                 }
-            }
-            (AppView::Home, Some(Button::Confirm)) => {
-                next.view = AppView::Library;
-                next.selection = 0;
-                next.read_request_pending = false;
             }
             (AppView::Home, Some(Button::Previous)) => {
                 next.view = AppView::Sync;
@@ -628,7 +628,7 @@ mod tests {
 
     #[test]
     fn library_selection_opens_sd_book() {
-        let state = press(ReaderState::boot(), Button::Confirm)
+        let state = press(ReaderState::boot(), Button::Back)
             .apply_library_event(CTX, LibraryEvent::Scanned { count: 2 });
         let state = press(press(state, Button::Next), Button::Confirm);
         assert_eq!(state.view, AppView::Reading);
@@ -659,7 +659,7 @@ mod tests {
 
     #[test]
     fn catalog_scan_does_not_auto_open_from_files() {
-        let state = press(ReaderState::boot(), Button::Confirm);
+        let state = press(ReaderState::boot(), Button::Back);
         assert_eq!(state.view, AppView::Library);
         assert!(!state.read_request_pending);
 
