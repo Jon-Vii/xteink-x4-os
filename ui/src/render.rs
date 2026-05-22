@@ -4,7 +4,7 @@ use display::font::{draw_text, literata, measure_text, BitmapFont, FontStyle};
 use display::render::{fill_rect, stroke_rect};
 use display::{Rect, HEIGHT, WIDTH};
 
-const HOME_ITEMS: [&str; 4] = ["Files", "Files", "Sync", "Settings"];
+const HOME_ITEMS: [&str; 4] = ["Read", "Files", "Sync", "Settings"];
 const SETTINGS_ITEMS: [&str; 3] = ["ORIENTATION", "REFRESH", "BACK TO HOME"];
 pub fn render_shell(fb: &mut Framebuffer, shell: &UiShell<'_>) {
     fb.clear(true);
@@ -86,7 +86,7 @@ fn render_library(fb: &mut Framebuffer, shell: &UiShell<'_>) {
         draw_text_truncated(fb, font, entry, x, baseline_y, 620, false);
         baseline_y += 38;
     }
-    draw_text(fb, meta_font, "OK / Back opens", 58, 448, false);
+    draw_text(fb, meta_font, "OK opens  Back returns", 58, 448, false);
     mirror_framebuffer_long_axis(fb);
 }
 

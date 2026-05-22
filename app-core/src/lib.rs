@@ -66,6 +66,14 @@ pub enum AppView {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum HomeAction {
+    Read,
+    Files,
+    Sync,
+    Settings,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RefreshPolicy {
     FastOnly,
     FullOnWake,
@@ -251,25 +259,8 @@ impl ReaderState {
         match (self.view, button) {
             (_, None) => {}
             (_, Some(Button::Power)) => {}
-            (AppView::Home, Some(Button::Back)) => {
-                next.view = AppView::Library;
-                next.selection = 0;
-                next.read_request_pending = false;
-            }
-            (AppView::Home, Some(Button::Confirm)) => {
-                next.view = AppView::Library;
-                next.selection = 0;
-                next.read_request_pending = false;
-            }
-            (AppView::Home, Some(Button::Previous)) => {
-                next.view = AppView::Sync;
-                next.selection = 0;
-                next.read_request_pending = false;
-            }
-            (AppView::Home, Some(Button::Next)) => {
-                next.view = AppView::Settings;
-                next.selection = 0;
-                next.read_request_pending = false;
+            (AppView::Home, Some(button)) => {
+                next = apply_home_action(next, home_action_for_button(button));
             }
             (AppView::Library, Some(Button::Next)) => {
                 next.selection = wrap_next(self.selection, self.library_item_count(ctx));
@@ -277,12 +268,12 @@ impl ReaderState {
             (AppView::Library, Some(Button::Previous)) => {
                 next.selection = wrap_prev(self.selection, self.library_item_count(ctx));
             }
-            (AppView::Library, Some(Button::Back)) if self.library_count == 0 => {
+            (AppView::Library, Some(Button::Back)) => {
                 next.view = AppView::Home;
                 next.selection = 1;
                 next.read_request_pending = false;
             }
-            (AppView::Library, Some(Button::Confirm | Button::Back)) => {
+            (AppView::Library, Some(Button::Confirm)) => {
                 if self.selection < self.library_count {
                     next.book_id = self.selection as u32 + 2;
                     next.view = AppView::Reading;
@@ -554,6 +545,45 @@ fn wrap_prev(value: u8, len: u8) -> u8 {
     }
 }
 
+fn home_action_for_button(button: Button) -> HomeAction {
+    match button {
+        // Home is a physical dock, not a semantic list. The bottom-edge
+        // hardware order is Back, Confirm, Previous/Left, Next/Right.
+        Button::Back => HomeAction::Read,
+        Button::Confirm => HomeAction::Files,
+        Button::Previous => HomeAction::Sync,
+        Button::Next | Button::Power => HomeAction::Settings,
+    }
+}
+
+fn apply_home_action(mut state: ReaderState, action: HomeAction) -> ReaderState {
+    state.selection = 0;
+    state.read_request_pending = false;
+    match action {
+        HomeAction::Read => {
+            if state.book_id >= 2 {
+                state.view = AppView::Reading;
+                state.selection = state.chapter;
+            } else if state.library_count > 0 {
+                state.view = AppView::Library;
+            } else {
+                state.view = AppView::Reading;
+                state.book_id = 1;
+            }
+        }
+        HomeAction::Files => {
+            state.view = AppView::Library;
+        }
+        HomeAction::Sync => {
+            state.view = AppView::Sync;
+        }
+        HomeAction::Settings => {
+            state.view = AppView::Settings;
+        }
+    }
+    state
+}
+
 fn apply_setting(mut state: ReaderState) -> ReaderState {
     match state.selection {
         0 => {
@@ -601,7 +631,7 @@ mod tests {
         );
         assert_eq!(
             press(ReaderState::boot(), Button::Back).view,
-            AppView::Library
+            AppView::Reading
         );
         assert_eq!(
             press(ReaderState::boot(), Button::Previous).view,
@@ -615,7 +645,7 @@ mod tests {
 
     #[test]
     fn library_selection_opens_sd_book() {
-        let state = press(ReaderState::boot(), Button::Back)
+        let state = press(ReaderState::boot(), Button::Confirm)
             .apply_library_event(CTX, LibraryEvent::Scanned { count: 2 });
         let state = press(press(state, Button::Next), Button::Confirm);
         assert_eq!(state.view, AppView::Reading);
@@ -623,12 +653,12 @@ mod tests {
     }
 
     #[test]
-    fn library_back_also_opens_sd_book() {
-        let state = press(ReaderState::boot(), Button::Back)
+    fn library_back_returns_home_without_opening() {
+        let state = press(ReaderState::boot(), Button::Confirm)
             .apply_library_event(CTX, LibraryEvent::Scanned { count: 2 });
         let state = press(press(state, Button::Next), Button::Back);
-        assert_eq!(state.view, AppView::Reading);
-        assert_eq!(state.book_id, 3);
+        assert_eq!(state.view, AppView::Home);
+        assert_eq!(state.book_id, 1);
     }
 
     #[test]
@@ -655,7 +685,7 @@ mod tests {
 
     #[test]
     fn catalog_scan_does_not_auto_open_from_files() {
-        let state = press(ReaderState::boot(), Button::Back);
+        let state = press(ReaderState::boot(), Button::Confirm);
         assert_eq!(state.view, AppView::Library);
         assert!(!state.read_request_pending);
 

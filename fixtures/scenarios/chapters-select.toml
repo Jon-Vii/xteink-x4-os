@@ -5,9 +5,6 @@ button = "Back"
 button = "Confirm"
 
 [[steps]]
-button = "Confirm"
-
-[[steps]]
 button = "Next"
 
 [[steps]]
