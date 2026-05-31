@@ -5,7 +5,6 @@ use embedded_hal::spi::{Operation, SpiBus as BlockingSpiBus, SpiDevice};
 use embedded_sdmmc::{Directory, SdCard, TimeSource, Timestamp, VolumeIdx, VolumeManager};
 use esp_hal::gpio::Output;
 use esp_hal::peripherals::SPI2;
-use esp_hal::prelude::*;
 use esp_hal::spi::master::SpiDmaBus;
 use esp_hal::spi::FullDuplexMode;
 use esp_hal::Async;
@@ -25,11 +24,23 @@ impl TimeSource for StaticTime {
     }
 }
 
+pub(crate) struct SdDelay;
+
+impl DelayNs for SdDelay {
+    fn delay_ns(&mut self, ns: u32) {
+        for _ in 0..ns.saturating_div(100).max(1) {
+            core::hint::spin_loop();
+        }
+    }
+}
+
 pub(crate) struct SdSpiDevice<'a, SPI, CS> {
     pub(crate) spi: &'a mut SPI,
     pub(crate) cs: &'a mut CS,
-    pub(crate) delay: esp_hal::delay::Delay,
+    pub(crate) delay: SdDelay,
 }
+
+const SD_SPI_CHUNK_BYTES: usize = 512;
 
 impl<SPI, CS> embedded_hal::spi::ErrorType for SdSpiDevice<'_, SPI, CS>
 where
@@ -49,10 +60,10 @@ where
 
         for operation in operations {
             result = match operation {
-                Operation::Read(buffer) => self.spi.read(buffer),
-                Operation::Write(buffer) => self.spi.write(buffer),
-                Operation::Transfer(read, write) => self.spi.transfer(read, write),
-                Operation::TransferInPlace(buffer) => self.spi.transfer_in_place(buffer),
+                Operation::Read(buffer) => self.read_with_sd_clocks(buffer),
+                Operation::Write(buffer) => self.write_chunked(buffer),
+                Operation::Transfer(read, write) => self.transfer_chunked(read, write),
+                Operation::TransferInPlace(buffer) => self.transfer_in_place_chunked(buffer),
                 Operation::DelayNs(ns) => {
                     self.delay.delay_ns(*ns);
                     Ok(())
@@ -70,13 +81,63 @@ where
     }
 }
 
+impl<SPI, CS> SdSpiDevice<'_, SPI, CS>
+where
+    SPI: BlockingSpiBus<u8>,
+{
+    fn read_with_sd_clocks(&mut self, buffer: &mut [u8]) -> Result<(), SPI::Error> {
+        for chunk in buffer.chunks_mut(SD_SPI_CHUNK_BYTES) {
+            chunk.fill(0xFF);
+            self.spi.transfer_in_place(chunk)?;
+        }
+        Ok(())
+    }
+
+    fn write_chunked(&mut self, buffer: &[u8]) -> Result<(), SPI::Error> {
+        for chunk in buffer.chunks(SD_SPI_CHUNK_BYTES) {
+            self.spi.write(chunk)?;
+        }
+        Ok(())
+    }
+
+    fn transfer_chunked(&mut self, read: &mut [u8], write: &[u8]) -> Result<(), SPI::Error> {
+        let common = read.len().min(write.len());
+        let (read_common, read_tail) = read.split_at_mut(common);
+        let (write_common, write_tail) = write.split_at(common);
+
+        for (read_chunk, write_chunk) in read_common
+            .chunks_mut(SD_SPI_CHUNK_BYTES)
+            .zip(write_common.chunks(SD_SPI_CHUNK_BYTES))
+        {
+            let mut in_place = [0xFF; SD_SPI_CHUNK_BYTES];
+            in_place[..write_chunk.len()].copy_from_slice(write_chunk);
+            self.spi
+                .transfer_in_place(&mut in_place[..write_chunk.len()])?;
+            read_chunk.copy_from_slice(&in_place[..read_chunk.len()]);
+        }
+        if !read_tail.is_empty() {
+            self.read_with_sd_clocks(read_tail)?;
+        }
+        if !write_tail.is_empty() {
+            self.write_chunked(write_tail)?;
+        }
+        Ok(())
+    }
+
+    fn transfer_in_place_chunked(&mut self, buffer: &mut [u8]) -> Result<(), SPI::Error> {
+        for chunk in buffer.chunks_mut(SD_SPI_CHUNK_BYTES) {
+            self.spi.transfer_in_place(chunk)?;
+        }
+        Ok(())
+    }
+}
+
 type SdSpi<'a> = SdSpiDevice<'a, SpiDmaBus<'static, SPI2, FullDuplexMode, Async>, Output<'static>>;
-type SdCardDevice<'a> = SdCard<SdSpi<'a>, esp_hal::delay::Delay>;
-pub(crate) type SdRoot<'a> = Directory<'a, SdCardDevice<'a>, StaticTime, 4, 4, 1>;
+type SdCardDevice<'a> = SdCard<SdSpi<'a>, SdDelay>;
+pub(crate) type SdRoot<'a> = Directory<'a, SdCardDevice<'a>, StaticTime, 8, 8, 1>;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum SdSessionError {
-    StartupClocks,
     CardInit,
     Volume,
     Root,
@@ -89,32 +150,31 @@ pub(crate) fn with_root<R>(
 ) -> Result<R, SdSessionError> {
     epd.deselect_display();
     sd_cs.set_high();
-    epd.spi_mut().change_bus_frequency(400_u32.kHz());
-
-    let startup_clocks = [0xFF; 10];
-    if BlockingSpiBus::write(epd.spi_mut(), &startup_clocks).is_err() {
-        epd.spi_mut().change_bus_frequency(40_u32.MHz());
-        return Err(SdSessionError::StartupClocks);
-    }
+    esp_println::println!("sd: session enter");
 
     let result = {
         let spi = SdSpiDevice {
             spi: epd.spi_mut(),
             cs: sd_cs,
-            delay: esp_hal::delay::Delay::new(),
+            delay: SdDelay,
         };
-        let card = SdCard::new(spi, esp_hal::delay::Delay::new());
+        let card = SdCard::new(spi, SdDelay);
+        esp_println::println!("sd: card probe");
         if card.num_bytes().is_err() {
             Err(SdSessionError::CardInit)
         } else {
-            card.spi(|device| device.spi.change_bus_frequency(8_u32.MHz()));
-            let volume_mgr: VolumeManager<_, _, 4, 4, 1> = VolumeManager::new(card, StaticTime);
+            esp_println::println!("sd: card ready");
+            let volume_mgr: VolumeManager<_, _, 8, 8, 1> =
+                VolumeManager::new_with_limits(card, StaticTime, 5000);
             let result = match volume_mgr.open_volume(VolumeIdx(0)) {
                 Ok(volume) => {
+                    esp_println::println!("sd: volume open");
                     let raw_volume = volume.to_raw_volume();
                     if let Ok(raw_root) = volume_mgr.open_root_dir(raw_volume) {
+                        esp_println::println!("sd: root open");
                         let root = Directory::new(raw_root, &volume_mgr);
                         let value = f(&root);
+                        esp_println::println!("sd: root callback done");
                         drop(root);
                         let _ = volume_mgr.close_volume(raw_volume);
                         Ok(value)
@@ -129,6 +189,6 @@ pub(crate) fn with_root<R>(
         }
     };
 
-    epd.spi_mut().change_bus_frequency(40_u32.MHz());
+    esp_println::println!("sd: session exit");
     result
 }

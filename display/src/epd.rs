@@ -18,6 +18,7 @@ pub const CMD_AUTO_WRITE_BW_RAM: u8 = 0x46;
 pub const CMD_AUTO_WRITE_RED_RAM: u8 = 0x47;
 pub const CMD_SET_RAM_X_COUNTER: u8 = 0x4E;
 pub const CMD_SET_RAM_Y_COUNTER: u8 = 0x4F;
+pub const DATA_ENTRY_X_INC_Y_DEC: u8 = 0x01;
 
 pub const MIRROR_X: bool = true;
 pub const MIRROR_Y: bool = false;
@@ -66,7 +67,7 @@ pub static INIT_SEQUENCE: &[SpiOp] = &[
     },
     SpiOp::Command {
         cmd: CMD_DATA_ENTRY_MODE,
-        data: &[0x01],
+        data: &[DATA_ENTRY_X_INC_Y_DEC],
     },
     SpiOp::Command {
         cmd: CMD_SET_RAM_X_RANGE,

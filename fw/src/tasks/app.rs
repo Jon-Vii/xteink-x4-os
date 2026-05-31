@@ -93,6 +93,16 @@ pub async fn run() {
                     rendering = false;
                     render_pending = false;
                 }
+                DisplayEvent::Library(event) => {
+                    state = state.apply_library_event(ctx, event);
+                    if rendering {
+                        render_pending = true;
+                    } else {
+                        send_render(RenderKind::Page, state).await;
+                        rendering = true;
+                        render_pending = false;
+                    }
+                }
             },
             Either3::Third(event) => {
                 state = state.apply_library_event(ctx, event);

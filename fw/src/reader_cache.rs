@@ -1,7 +1,11 @@
 use crate::display_flush::Epd;
 use crate::reader_cache_files;
+use crate::reader_cache_files::{BookIndexLoadResult, CacheLoadResult};
 use crate::reader_layout;
-use crate::reader_store::{BookLoadStatus, ReaderStore, MAX_READER_BLOCK_TEXT};
+use crate::reader_store::{
+    source_hash, BookLoadStatus, ReaderStore, EMPTY_BOOK_SECTION_RECORD, MAX_BOOK_SECTIONS,
+    MAX_READER_BLOCK_TEXT,
+};
 use crate::sd_session::{self, SdSessionError};
 use display::font::{literata, FontStyle};
 use embassy_time::Instant;
@@ -10,10 +14,11 @@ use esp_hal::gpio::Output;
 use hal_ext::nvm::AppStateRecord;
 use heapless::String;
 use proto::book::BookId;
+use proto::cache::BookV2SectionRecord;
 use proto::epub::{
-    parse_css_text_align, parse_epub2_ncx_to_sink, parse_epub3_nav_to_sink, parse_opf,
-    xhtml_blocks_to_sink, CssRules, EpubTocSink, ReadAt, TocError, XhtmlBlockSink, XhtmlError,
-    ZipInflateScratch, ZipStream, MAX_ENTRY_NAME_BYTES,
+    parse_epub2_ncx_to_sink, parse_epub3_nav_to_sink, parse_opf, xhtml_blocks_to_sink, CssRules,
+    EpubTocSink, ReadAt, TocError, XhtmlBlockSink, XhtmlError, ZipInflateScratch, ZipStream,
+    MAX_ENTRY_NAME_BYTES,
 };
 use proto::text::{TextAlign, TextRole};
 
@@ -22,9 +27,11 @@ pub(crate) const READER_HEADER_SCRATCH: usize = 46;
 pub(crate) const READER_COMPRESSED_SCRATCH: usize = 24_576;
 pub(crate) const READER_CONTAINER_SCRATCH: usize = 4096;
 pub(crate) const READER_OPF_SCRATCH: usize = 16_384;
-pub(crate) const READER_CSS_SCRATCH: usize = 8_192;
-pub(crate) const READER_XHTML_SCRATCH: usize = 24_576;
-const COVER_SIDECAR_ENABLED: bool = true;
+pub(crate) const READER_XHTML_SCRATCH: usize = 61_440;
+const EPUB_READ_AT_CHUNK_BYTES: usize = 2048;
+const EPUB_OPEN_READ_OP_LIMIT: u16 = 4096;
+const EPUB_OPEN_READ_BYTE_LIMIT: u32 = 4 * 1024 * 1024;
+const QUICK_OPEN_MAX_SECTIONS: usize = 4;
 
 pub(crate) struct ReaderCacheScratch<'a> {
     tail: &'a mut [u8; READER_TAIL_SCRATCH],
@@ -33,17 +40,8 @@ pub(crate) struct ReaderCacheScratch<'a> {
     compressed: &'a mut [u8; READER_COMPRESSED_SCRATCH],
     container: &'a mut [u8; READER_CONTAINER_SCRATCH],
     opf: &'a mut [u8; READER_OPF_SCRATCH],
-    css: &'a mut [u8; READER_CSS_SCRATCH],
     xhtml: &'a mut [u8; READER_XHTML_SCRATCH],
     zip_inflate: ZipInflateScratch,
-}
-
-struct CssScratch<'a> {
-    header: &'a mut [u8; 46],
-    name: &'a mut [u8; MAX_ENTRY_NAME_BYTES],
-    compressed: &'a mut [u8; READER_COMPRESSED_SCRATCH],
-    css: &'a mut [u8; READER_CSS_SCRATCH],
-    zip_inflate: &'a mut ZipInflateScratch,
 }
 
 struct TocScratch<'a> {
@@ -80,7 +78,6 @@ impl EpubTocSink for LibraryTocSink<'_, '_> {
 }
 
 impl<'a> ReaderCacheScratch<'a> {
-    #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
         tail: &'a mut [u8; READER_TAIL_SCRATCH],
         header: &'a mut [u8; READER_HEADER_SCRATCH],
@@ -88,7 +85,6 @@ impl<'a> ReaderCacheScratch<'a> {
         compressed: &'a mut [u8; READER_COMPRESSED_SCRATCH],
         container: &'a mut [u8; READER_CONTAINER_SCRATCH],
         opf: &'a mut [u8; READER_OPF_SCRATCH],
-        css: &'a mut [u8; READER_CSS_SCRATCH],
         xhtml: &'a mut [u8; READER_XHTML_SCRATCH],
     ) -> Self {
         Self {
@@ -98,7 +94,6 @@ impl<'a> ReaderCacheScratch<'a> {
             compressed,
             container,
             opf,
-            css,
             xhtml,
             zip_inflate: ZipInflateScratch::new(),
         }
@@ -221,7 +216,6 @@ fn status_for_load_result(
 
 fn session_error_label(error: SdSessionError) -> &'static str {
     match error {
-        SdSessionError::StartupClocks => "SPI CLOCKS",
         SdSessionError::CardInit => "CARD INIT",
         SdSessionError::Volume => "VOLUME",
         SdSessionError::Root => "ROOT",
@@ -235,6 +229,7 @@ fn set_preview_error_from_error(library: &mut ReaderStore, error: ReaderCacheErr
         ReaderCacheError::Zip(proto::epub::ZipError::UnsupportedCompression) => "ZIP METHOD",
         ReaderCacheError::Zip(proto::epub::ZipError::EntryNotFound) => "ZIP MISSING",
         ReaderCacheError::Zip(proto::epub::ZipError::Inflate) => "ZIP INFLATE",
+        ReaderCacheError::Zip(proto::epub::ZipError::Io) => "OPEN BUDGET",
         ReaderCacheError::Zip(_) => "ZIP",
         ReaderCacheError::Epub(proto::epub::EpubError::TooManyManifestItems) => "OPF MANIFEST",
         ReaderCacheError::Epub(proto::epub::EpubError::TooManySpineItems) => "OPF SPINE",
@@ -293,7 +288,7 @@ fn build_or_load_epub_cache_from_file<
     file: File<'_, D, T, MAX_DIRS, MAX_FILES, MAX_VOLUMES>,
     root: &Directory<'_, D, T, MAX_DIRS, MAX_FILES, MAX_VOLUMES>,
     source_path: &str,
-    requested_chapter: u8,
+    _requested_chapter: u8,
     target_pages: usize,
     library: &mut ReaderStore,
     scratch: &mut ReaderCacheScratch<'_>,
@@ -304,16 +299,25 @@ where
 {
     let open_started = Instant::now();
     let source_len = file.length();
+    let source_identity = (source_hash(source_path, source_len), source_len);
     let cache_key = proto::cache::cache_key_for(source_path, source_len);
     library.set_cache_key(cache_key.as_str());
 
-    let reader = SdFileReadAt { file };
+    esp_println::println!("epub: stage ResolveCatalogEntry key={}", cache_key.as_str());
+    esp_println::println!("epub: stage OpenSdFile len={}", source_len);
+    esp_println::println!("epub: zip open len={}", source_len);
+    let reader = SdFileReadAt {
+        file,
+        read_ops: 0,
+        read_bytes: 0,
+    };
     let mut zip = ZipStream::new(reader, scratch.tail)?;
     esp_println::println!(
         "epub: zip ready after {} ms",
         open_started.elapsed().as_millis()
     );
 
+    esp_println::println!("epub: stage ParseContainerAndOpf");
     let container_entry = zip.find_entry("META-INF/container.xml", scratch.header, scratch.name)?;
     let container_len = zip.read_entry_streamed(
         container_entry,
@@ -365,63 +369,58 @@ where
         open_started.elapsed().as_millis(),
         library.toc_count
     );
+    let css_rules = CssRules::new();
 
-    let mut css_rules = CssRules::new();
-    load_css_rules(
-        &mut zip,
-        opf_path,
-        &package,
-        CssScratch {
-            header: scratch.header,
-            name: scratch.name,
-            compressed: scratch.compressed,
-            css: scratch.css,
-            zip_inflate: &mut scratch.zip_inflate,
-        },
-        &mut css_rules,
-    );
-    esp_println::println!(
-        "epub: css parsed after {} ms ({} rule(s))",
-        open_started.elapsed().as_millis(),
-        css_rules.rules.len()
-    );
-
-    let mut xhtml_path = String::<MAX_ENTRY_NAME_BYTES>::new();
-    let mut saw_spine = false;
-    let mut section_incomplete = false;
-    let start_spine = requested_start_spine(&package, library, requested_chapter);
-    let _ = reader_cache_files::ensure_cache_dirs(root, cache_key.as_str());
-    if COVER_SIDECAR_ENABLED {
-        reader_cache_files::load_cover_cache(root, cache_key.as_str(), library);
-    }
-    reader_cache_files::write_book_cache(root, cache_key.as_str(), &package, library);
-    if let Some(cached_pages) = reader_cache_files::load_section_cache(
-        root,
-        cache_key.as_str(),
-        start_spine as u16,
-        library,
-    ) {
-        if cached_pages >= target_pages {
-            reader_layout::rebuild_toc_page_targets(library);
-            esp_println::println!(
-                "epub: section cache hit after {} ms ({} page(s), spine {})",
-                open_started.elapsed().as_millis(),
-                library.page_count,
-                start_spine
-            );
-            return Ok(());
+    let requested_global_page = target_pages as u32;
+    esp_println::println!("epub: stage TryV2BookIndex page={}", requested_global_page);
+    match reader_cache_files::load_v2_book_index(root, cache_key.as_str(), source_identity, library)
+    {
+        BookIndexLoadResult::Hit => {
+            match reader_cache_files::load_v2_section_by_global_page(
+                root,
+                cache_key.as_str(),
+                source_identity,
+                requested_global_page,
+                library,
+            ) {
+                CacheLoadResult::Hit { pages } => {
+                    reader_layout::rebuild_toc_page_targets(library);
+                    esp_println::println!(
+                        "epub: v2 book cache ready after {} ms (total={} section_pages={})",
+                        open_started.elapsed().as_millis(),
+                        library.advertised_page_count(),
+                        pages
+                    );
+                    return Ok(());
+                }
+                other => esp_println::println!("epub: book index section load {:?}", other),
+            }
         }
-        library.clear_lines();
+        BookIndexLoadResult::Invalid => esp_println::println!("epub: v2 book index invalid"),
+        BookIndexLoadResult::Miss => esp_println::println!("epub: v2 book index miss"),
     }
+
+    esp_println::println!("epub: stage BuildV2BookCache");
+    let mut xhtml_path = String::<MAX_ENTRY_NAME_BYTES>::new();
+    let mut sections = [EMPTY_BOOK_SECTION_RECORD; MAX_BOOK_SECTIONS];
+    let mut section_count = 0usize;
+    let mut total_pages = 0u32;
+    let mut saw_spine = false;
+    let mut book_partial = false;
+    let visible_page_capacity = library.page_capacity().max(1);
 
     for (spine_index, spine) in package
         .spine
         .iter()
         .enumerate()
-        .skip(start_spine)
         .filter(|(_, item)| !item.href.is_empty() && !spine_item_is_navigation(item, &package))
     {
+        if section_count >= sections.len() {
+            book_partial = true;
+            break;
+        }
         saw_spine = true;
+        library.clear_lines();
         resolve_epub_href(opf_path, spine.href, &mut xhtml_path)?;
         let Ok(xhtml_entry) = zip.find_entry(&xhtml_path, scratch.header, scratch.name) else {
             continue;
@@ -439,15 +438,17 @@ where
             &mut scratch.zip_inflate,
         )?;
         let xhtml_len = valid_utf8_prefix_len(&scratch.xhtml[..xhtml_len], xhtml_complete)?;
-        section_incomplete |= !xhtml_complete;
         let xhtml = core::str::from_utf8(&scratch.xhtml[..xhtml_len])
             .map_err(|_| ReaderCacheError::Utf8)?;
-        if library.block_count() > 0 {
-            library.force_next_block_to_new_page();
-        }
-        let target_pages = target_pages.max(1).min(library.page_capacity());
         let mut sink = LibraryBlockSink {
             library,
+            root,
+            cache_key: cache_key.as_str(),
+            source_identity,
+            sections: &mut sections,
+            section_count: &mut section_count,
+            total_pages: &mut total_pages,
+            book_partial: &mut book_partial,
             spine_index: spine_index.min(u16::MAX as usize) as u16,
             line: String::new(),
             line_role: TextRole::Body,
@@ -456,47 +457,64 @@ where
             pending_space: false,
             dropping_paragraph: false,
             stopped: false,
-            target_pages,
+            target_pages: visible_page_capacity,
         };
-        xhtml_blocks_to_sink(xhtml, Some(&css_rules), &mut sink)?;
-        let stopped = sink.stopped;
-        reader_layout::rebuild_page_index(
-            library,
-            reader_layout::READER_PAGE_TOP,
-            reader_layout::READER_PAGE_BOTTOM,
-        );
-        if library.block_count() >= library.block_capacity().saturating_sub(4) {
-            break;
+        match xhtml_blocks_to_sink(xhtml, Some(&css_rules), &mut sink) {
+            Ok(()) => {}
+            Err(err) if sink.stopped => {
+                esp_println::println!(
+                    "epub: bounded open stopped at spine {} after {} section(s): {:?}",
+                    spine_index,
+                    *sink.section_count,
+                    err
+                );
+            }
+            Err(err) => return Err(err.into()),
         }
-        if !xhtml_complete || stopped || library.page_count >= target_pages {
+        sink.finish_spine(!xhtml_complete);
+        if section_count >= QUICK_OPEN_MAX_SECTIONS {
+            book_partial = true;
+            esp_println::println!(
+                "epub: bounded open publishing partial book after {} section(s), {} page(s)",
+                section_count,
+                total_pages
+            );
             break;
         }
     }
 
-    if library.block_count() > 0 {
-        reader_layout::rebuild_page_index(
-            library,
-            reader_layout::READER_PAGE_TOP,
-            reader_layout::READER_PAGE_BOTTOM,
-        );
-        reader_layout::rebuild_toc_page_targets(library);
-        library.set_cached_spine(start_spine.min(u16::MAX as usize) as u16);
-        library.set_section_partial(
-            section_incomplete
-                || library.page_count >= target_pages
-                || library.block_count() >= library.block_capacity().saturating_sub(4),
-        );
-        reader_cache_files::write_section_cache(
+    if section_count > 0 && total_pages > 0 {
+        let sections_slice = &sections[..section_count];
+        let wrote_index = reader_cache_files::write_v2_book_index(
             root,
             cache_key.as_str(),
-            start_spine.min(u16::MAX as usize) as u16,
-            library,
+            source_identity,
+            total_pages,
+            sections_slice,
+            book_partial,
         );
+        library.set_book_index(total_pages, book_partial || !wrote_index, sections_slice);
+        match reader_cache_files::load_v2_section_by_global_page(
+            root,
+            cache_key.as_str(),
+            source_identity,
+            requested_global_page.min(total_pages.saturating_sub(1)),
+            library,
+        ) {
+            CacheLoadResult::Hit { .. } => {}
+            _ => {
+                let first = sections_slice[0];
+                library.set_current_section_range(first.start_page, first.page_count as usize);
+            }
+        }
+        reader_layout::rebuild_toc_page_targets(library);
+        esp_println::println!("epub: stage PublishLoaded");
         esp_println::println!(
-            "epub: initial cache ready after {} ms ({} page(s), {} block(s), key {})",
+            "epub: full book cache ready after {} ms (total={} sections={} partial={} key {})",
             open_started.elapsed().as_millis(),
-            library.page_count,
-            library.block_count(),
+            total_pages,
+            section_count,
+            book_partial,
             cache_key.as_str()
         );
         Ok(())
@@ -529,29 +547,6 @@ fn spine_item_is_navigation(
         || lower_href.ends_with("nav.html")
 }
 
-fn requested_start_spine(
-    package: &proto::epub::EpubPackage<'_>,
-    library: &ReaderStore,
-    requested_chapter: u8,
-) -> usize {
-    if requested_chapter > 0 {
-        if let Some(record) = library.toc.get(requested_chapter as usize) {
-            if record.spine_index >= 0 {
-                return (record.spine_index as usize).min(package.spine.len().saturating_sub(1));
-            }
-        }
-    }
-    package
-        .text_reference_href
-        .and_then(|href| {
-            package
-                .spine
-                .iter()
-                .position(|item| strip_fragment(item.href) == href)
-        })
-        .unwrap_or(0)
-}
-
 fn valid_utf8_prefix_len(bytes: &[u8], complete: bool) -> Result<usize, ReaderCacheError> {
     match core::str::from_utf8(bytes) {
         Ok(_) => Ok(bytes.len()),
@@ -560,46 +555,8 @@ fn valid_utf8_prefix_len(bytes: &[u8], complete: bool) -> Result<usize, ReaderCa
     }
 }
 
-fn load_css_rules<R>(
-    zip: &mut ZipStream<R>,
-    opf_path: &str,
-    package: &proto::epub::EpubPackage<'_>,
-    scratch: CssScratch<'_>,
-    rules: &mut CssRules,
-) where
-    R: ReadAt,
-{
-    rules.clear();
-    let mut css_path = String::<MAX_ENTRY_NAME_BYTES>::new();
-    for item in package
-        .manifest
-        .iter()
-        .filter(|item| item.media_type.contains("css") || item.href.ends_with(".css"))
-    {
-        if resolve_epub_href(opf_path, item.href, &mut css_path).is_err() {
-            continue;
-        }
-        let Ok(css_entry) = zip.find_entry(&css_path, &mut *scratch.header, &mut *scratch.name)
-        else {
-            continue;
-        };
-        let Ok(css_len) = zip.read_entry_streamed(
-            css_entry,
-            &mut *scratch.compressed,
-            &mut *scratch.css,
-            &mut *scratch.zip_inflate,
-        ) else {
-            continue;
-        };
-        let Ok(css_text) = core::str::from_utf8(&scratch.css[..css_len]) else {
-            continue;
-        };
-        parse_css_text_align(css_text, rules);
-    }
-}
-
 fn load_epub_toc<R>(
-    zip: &mut ZipStream<R>,
+    zip: &mut ZipStream<'_, R>,
     opf_path: &str,
     package: &proto::epub::EpubPackage<'_>,
     library: &mut ReaderStore,
@@ -622,7 +579,7 @@ fn load_epub_toc<R>(
         toc_entry,
         scratch.compressed,
         scratch.xhtml,
-        &mut *scratch.zip_inflate,
+        scratch.zip_inflate,
     ) else {
         return;
     };
@@ -631,11 +588,30 @@ fn load_epub_toc<R>(
     };
 
     let mut sink = LibraryTocSink { library, package };
-    if package.nav_href == Some(toc_href) {
-        let _ = parse_epub3_nav_to_sink(toc_text, &mut sink);
+    let result = if toc_path.as_str().ends_with(".ncx") {
+        parse_epub2_ncx_to_sink(toc_text, &mut sink)
     } else {
-        let _ = parse_epub2_ncx_to_sink(toc_text, &mut sink);
+        parse_epub3_nav_to_sink(toc_text, &mut sink)
+    };
+    if result.is_err() {
+        sink.library.clear_toc();
     }
+}
+
+fn href_matches_spine(href: &str, spine_href: &str) -> bool {
+    let href = strip_fragment(href);
+    href == spine_href
+        || href.ends_with(spine_href)
+        || spine_href.ends_with(href)
+        || file_name(href) == file_name(spine_href)
+}
+
+fn strip_fragment(value: &str) -> &str {
+    value.split('#').next().unwrap_or(value)
+}
+
+fn file_name(value: &str) -> &str {
+    value.rsplit('/').next().unwrap_or(value)
 }
 
 struct SdFileReadAt<
@@ -650,6 +626,8 @@ struct SdFileReadAt<
     T: TimeSource,
 {
     file: File<'a, D, T, MAX_DIRS, MAX_FILES, MAX_VOLUMES>,
+    read_ops: u16,
+    read_bytes: u32,
 }
 
 impl<D, T, const MAX_DIRS: usize, const MAX_FILES: usize, const MAX_VOLUMES: usize> ReadAt
@@ -658,15 +636,68 @@ where
     D: embedded_sdmmc::BlockDevice,
     T: TimeSource,
 {
-    type Error = embedded_sdmmc::Error<D::Error>;
+    type Error = ();
 
     fn len(&mut self) -> Result<u32, Self::Error> {
         Ok(self.file.length())
     }
 
     fn read_at(&mut self, offset: u32, out: &mut [u8]) -> Result<usize, Self::Error> {
-        self.file.seek_from_start(offset)?;
-        self.file.read(out)
+        if self.read_ops >= EPUB_OPEN_READ_OP_LIMIT || self.read_bytes >= EPUB_OPEN_READ_BYTE_LIMIT
+        {
+            esp_println::println!(
+                "epub: open read budget exceeded ops={} bytes={} at offset={} request={}",
+                self.read_ops,
+                self.read_bytes,
+                offset,
+                out.len()
+            );
+            return Err(());
+        }
+        let requested = out.len();
+        let remaining_budget = EPUB_OPEN_READ_BYTE_LIMIT.saturating_sub(self.read_bytes) as usize;
+        let read_len = requested
+            .min(EPUB_READ_AT_CHUNK_BYTES)
+            .min(remaining_budget);
+        if read_len == 0 {
+            return Err(());
+        }
+        let mut last_err = None;
+        for attempt in 0..3 {
+            if let Err(err) = self.file.seek_from_start(offset) {
+                last_err = Some(err);
+                continue;
+            }
+            match self.file.read(&mut out[..read_len]) {
+                Ok(count) => {
+                    self.read_ops = self.read_ops.saturating_add(1);
+                    self.read_bytes = self.read_bytes.saturating_add(count as u32);
+                    if attempt > 0 {
+                        esp_println::println!(
+                            "epub: read_at recovered at {} len {} attempt {}",
+                            offset,
+                            read_len,
+                            attempt + 1
+                        );
+                    }
+                    return Ok(count);
+                }
+                Err(err) => {
+                    last_err = Some(err);
+                    for _ in 0..128 {
+                        core::hint::spin_loop();
+                    }
+                }
+            }
+        }
+        let err = last_err.expect("read_at records an error before retry exhaustion");
+        esp_println::println!(
+            "epub: read_at failed at {} len {}: {:?}",
+            offset,
+            read_len,
+            err
+        );
+        Err(())
     }
 }
 
@@ -706,19 +737,26 @@ fn resolve_epub_href(
         .map_err(|_| ReaderCacheError::EntryNameTooLong)
 }
 
-fn strip_fragment(value: &str) -> &str {
-    value.split('#').next().unwrap_or(value)
-}
-
-fn href_matches_spine(toc_href: &str, spine_href: &str) -> bool {
-    let toc_href = strip_fragment(toc_href);
-    toc_href == spine_href
-        || toc_href.ends_with(spine_href)
-        || spine_href.ends_with(toc_href.rsplit('/').next().unwrap_or(toc_href))
-}
-
-struct LibraryBlockSink<'a> {
+struct LibraryBlockSink<
+    'a,
+    'r,
+    D,
+    T,
+    const MAX_DIRS: usize,
+    const MAX_FILES: usize,
+    const MAX_VOLUMES: usize,
+> where
+    D: embedded_sdmmc::BlockDevice,
+    T: TimeSource,
+{
     library: &'a mut ReaderStore,
+    root: &'r Directory<'r, D, T, MAX_DIRS, MAX_FILES, MAX_VOLUMES>,
+    cache_key: &'r str,
+    source_identity: (u32, u32),
+    sections: &'a mut [BookV2SectionRecord; MAX_BOOK_SECTIONS],
+    section_count: &'a mut usize,
+    total_pages: &'a mut u32,
+    book_partial: &'a mut bool,
     spine_index: u16,
     line: String<MAX_READER_BLOCK_TEXT>,
     line_role: TextRole,
@@ -730,7 +768,84 @@ struct LibraryBlockSink<'a> {
     target_pages: usize,
 }
 
-impl XhtmlBlockSink for LibraryBlockSink<'_> {
+impl<D, T, const MAX_DIRS: usize, const MAX_FILES: usize, const MAX_VOLUMES: usize>
+    LibraryBlockSink<'_, '_, D, T, MAX_DIRS, MAX_FILES, MAX_VOLUMES>
+where
+    D: embedded_sdmmc::BlockDevice,
+    T: TimeSource,
+{
+    fn finish_spine(&mut self, partial: bool) {
+        flush_styled_preview_line(self, true);
+        self.flush_section(partial || self.stopped);
+    }
+
+    fn flush_section(&mut self, partial: bool) -> bool {
+        reader_layout::rebuild_page_index(
+            self.library,
+            reader_layout::READER_PAGE_TOP,
+            reader_layout::READER_PAGE_BOTTOM,
+        );
+        if self.library.block_count() == 0 || self.library.page_count == 0 {
+            self.library.clear_lines();
+            return true;
+        }
+        if *self.section_count >= self.sections.len() {
+            *self.book_partial = true;
+            self.stopped = true;
+            return false;
+        }
+
+        self.library.set_cached_spine(self.spine_index);
+        self.library.set_section_partial(partial);
+        let section_id = (*self.section_count).min(u16::MAX as usize) as u16;
+        let wrote = reader_cache_files::write_v2_section_cache(
+            self.root,
+            self.cache_key,
+            self.source_identity,
+            section_id,
+            self.library,
+        );
+        if !wrote {
+            *self.book_partial = true;
+        }
+        self.sections[*self.section_count] = BookV2SectionRecord {
+            section: section_id,
+            spine: self.spine_index,
+            start_page: *self.total_pages,
+            page_count: self.library.page_count.min(u16::MAX as usize) as u16,
+            partial,
+        };
+        *self.total_pages = (*self.total_pages).saturating_add(self.library.page_count as u32);
+        *self.section_count += 1;
+        if *self.section_count >= QUICK_OPEN_MAX_SECTIONS {
+            *self.book_partial = true;
+            self.stopped = true;
+        }
+        self.library.clear_lines();
+        true
+    }
+
+    fn flush_if_full(&mut self) {
+        reader_layout::rebuild_page_index(
+            self.library,
+            reader_layout::READER_PAGE_TOP,
+            reader_layout::READER_PAGE_BOTTOM,
+        );
+        if self.library.page_count >= self.target_pages
+            || self.library.block_count() >= self.library.block_capacity().saturating_sub(4)
+        {
+            flush_styled_preview_line(self, false);
+            self.flush_section(false);
+        }
+    }
+}
+
+impl<D, T, const MAX_DIRS: usize, const MAX_FILES: usize, const MAX_VOLUMES: usize> XhtmlBlockSink
+    for LibraryBlockSink<'_, '_, D, T, MAX_DIRS, MAX_FILES, MAX_VOLUMES>
+where
+    D: embedded_sdmmc::BlockDevice,
+    T: TimeSource,
+{
     fn push_block(
         &mut self,
         text: &str,
@@ -740,11 +855,9 @@ impl XhtmlBlockSink for LibraryBlockSink<'_> {
         paragraph_end: bool,
     ) -> Result<(), XhtmlError> {
         if self.stopped {
-            return Ok(());
+            return Err(XhtmlError::TooManyRuns);
         }
-        if self.library.block_count() >= self.library.block_capacity() {
-            return Ok(());
-        }
+        self.flush_if_full();
         push_styled_preview_fragment(
             self,
             text,
@@ -753,13 +866,7 @@ impl XhtmlBlockSink for LibraryBlockSink<'_> {
             align,
             paragraph_end,
         );
-        reader_layout::rebuild_page_index(
-            self.library,
-            reader_layout::READER_PAGE_TOP,
-            reader_layout::READER_PAGE_BOTTOM,
-        );
-        self.stopped = self.library.page_count >= self.target_pages
-            || self.library.block_count() >= self.library.block_capacity().saturating_sub(4);
+        self.flush_if_full();
         Ok(())
     }
 }
@@ -782,14 +889,23 @@ fn preview_style_for_proto_style(style: proto::text::FontStyle, role: TextRole) 
     }
 }
 
-fn push_styled_preview_fragment(
-    sink: &mut LibraryBlockSink<'_>,
+fn push_styled_preview_fragment<
+    D,
+    T,
+    const MAX_DIRS: usize,
+    const MAX_FILES: usize,
+    const MAX_VOLUMES: usize,
+>(
+    sink: &mut LibraryBlockSink<'_, '_, D, T, MAX_DIRS, MAX_FILES, MAX_VOLUMES>,
     text: &str,
     style: FontStyle,
     role: TextRole,
     align: TextAlign,
     paragraph_end: bool,
-) {
+) where
+    D: embedded_sdmmc::BlockDevice,
+    T: TimeSource,
+{
     if sink.dropping_paragraph {
         if paragraph_end {
             sink.dropping_paragraph = false;
@@ -903,7 +1019,19 @@ fn append_style_marker<const N: usize>(line: &mut String<N>, style: FontStyle) -
         .map_err(|_| ())
 }
 
-fn flush_styled_preview_line(sink: &mut LibraryBlockSink<'_>, paragraph_end: bool) {
+fn flush_styled_preview_line<
+    D,
+    T,
+    const MAX_DIRS: usize,
+    const MAX_FILES: usize,
+    const MAX_VOLUMES: usize,
+>(
+    sink: &mut LibraryBlockSink<'_, '_, D, T, MAX_DIRS, MAX_FILES, MAX_VOLUMES>,
+    paragraph_end: bool,
+) where
+    D: embedded_sdmmc::BlockDevice,
+    T: TimeSource,
+{
     if sink.line.is_empty() {
         if paragraph_end {
             sink.library.mark_last_block_paragraph_end();

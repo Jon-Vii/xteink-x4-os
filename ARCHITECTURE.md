@@ -9,6 +9,61 @@ The design goal is not to imitate a desktop OS. It is a small data pipeline:
 buttons -> app state -> display command -> framebuffer -> SSD1677 RAM -> refresh -> sleep
 ```
 
+## Current architecture diagram
+
+![Current architecture diagram](docs/architecture.png)
+
+```mermaid
+flowchart TD
+    buttons["GPIO3 power button<br/>ADC button ladders"]
+    input_task["input_task<br/>debounce + classify buttons"]
+    app_task["app_task<br/>owns ReaderState reducer shell"]
+    display_task["board I/O + display task<br/>single owner of EPD bus, SD CS,<br/>ReaderStore, framebuffer"]
+    power_task["power_task<br/>idle timer + deep sleep"]
+    wifi_task["wifi_task<br/>parked sync placeholder"]
+
+    app_core["app-core<br/>Copy message contracts<br/>ReaderState reducer<br/>RefreshPlanner"]
+    display_crate["display<br/>1 bpp framebuffer<br/>drawing + fonts<br/>SSD1677 transforms"]
+    proto["proto<br/>bounded book/storage/text/cache models<br/>ZIP/EPUB/XHTML parser pieces"]
+    hal_ext["hal-ext<br/>SPI DMA, RTC, NVM helpers"]
+    ui["ui<br/>bounded layout/render helpers"]
+
+    epd["SSD1677 e-ink panel<br/>800x480 BW/RED RAM"]
+    sd["microSD FAT<br/>/BOOKS + card root EPUBs<br/>/XTEINK cache + state"]
+    sleep["ESP32-C3 deep sleep"]
+
+    emulator["tools/emulator<br/>host reducer + panel protocol model<br/>scenario/golden-frame runner"]
+    preview["tools/preview<br/>host render/export inspection"]
+    fixtures["fixtures<br/>TOML scenarios + golden PNGs"]
+
+    buttons -->|"raw samples"| input_task
+    input_task -->|"InputEvent"| app_task
+    app_task -->|"DisplayCommand::Render / Sleep"| display_task
+    app_task -->|"StorageCommand"| display_task
+    display_task -->|"DisplayEvent::Settled / Asleep<br/>LibraryEvent"| app_task
+    app_task -->|"PowerEvent::Activity"| power_task
+    display_task -->|"PowerEvent::DisplaySettled / DisplayAsleep"| power_task
+    power_task -->|"DisplayCommand::Sleep"| display_task
+    power_task --> sleep
+
+    app_task -.-> app_core
+    display_task -.-> app_core
+    display_task -.-> display_crate
+    display_task -.-> proto
+    display_task -.-> hal_ext
+    display_task -.-> ui
+
+    display_task -->|"framebuffer flush<br/>full/fast refresh"| epd
+    display_task -->|"SD session<br/>catalog, cache, progress"| sd
+
+    emulator -.-> app_core
+    emulator -.-> display_crate
+    emulator -.-> proto
+    emulator --> fixtures
+    preview -.-> display_crate
+    preview -.-> proto
+```
+
 ## Rules
 
 - `#![no_std]`, no heap allocation in firmware paths.

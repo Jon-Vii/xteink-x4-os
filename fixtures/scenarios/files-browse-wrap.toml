@@ -1,0 +1,24 @@
+[[steps]]
+button = "Confirm"
+
+[[steps]]
+library = "Scanned"
+count = 3
+
+[[steps]]
+button = "Next"
+
+[[steps]]
+button = "Next"
+
+[[steps]]
+button = "Next"
+
+[[steps]]
+button = "Previous"
+
+[expect]
+view = "Library"
+library_count = 3
+selection = 2
+last_button = "Previous"

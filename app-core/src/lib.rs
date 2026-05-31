@@ -162,6 +162,7 @@ impl RefreshPlanner {
         };
         if !self.fast_refresh_enabled
             || !self.screen_on
+            || last.kind == RenderKind::Boot
             || request.view != last.view
             || request.book_id != last.book_id
             || Self::needs_clean_selection_refresh(request, last)
@@ -200,7 +201,7 @@ impl RefreshPlanner {
     }
 
     fn needs_clean_library_refresh(request: RenderRequest, last: RenderRequest) -> bool {
-        request.view == AppView::Library && request.library_count != last.library_count
+        request.library_count != last.library_count
     }
 }
 
@@ -253,6 +254,7 @@ pub enum StorageCommand {
 pub enum DisplayEvent {
     Settled,
     Asleep,
+    Library(LibraryEvent),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -408,24 +410,17 @@ impl ReaderState {
                     next.sd_chapter_count = 1;
                     next.sd_chapter_pages = [0; MAX_SD_CHAPTERS];
                     next.read_request_pending = false;
-                } else if self.selection < self.library_item_count(ctx) {
-                    next.book_id = 1;
-                    next.view = AppView::Reading;
-                    next.selection = 0;
-                    next.read_request_pending = false;
                 }
             }
             (AppView::Reading, Some(Button::Next)) => {
                 if ReaderSource::from_book_id(self.book_id).is_sd() {
                     if self.page + 1 < self.sd_page_count {
                         next.page = self.page + 1;
-                    } else if self.chapter + 1 < self.sd_chapter_count {
-                        next.chapter = self.chapter + 1;
-                        next.selection = next.chapter;
-                        next.page = 0;
                     } else {
                         next.page = self.sd_page_count.saturating_sub(1);
                     }
+                    next.chapter = next.sd_chapter_for_page(next.page);
+                    next.selection = next.chapter;
                 } else {
                     next.chapter = wrap_next(self.chapter, ctx.builtin_chapter_count.max(1));
                     next.selection = next.chapter;
@@ -436,11 +431,9 @@ impl ReaderState {
                 if ReaderSource::from_book_id(self.book_id).is_sd() {
                     if self.page > 0 {
                         next.page = self.page - 1;
-                    } else if self.chapter > 0 {
-                        next.chapter = self.chapter - 1;
-                        next.selection = next.chapter;
-                        next.page = 0;
                     }
+                    next.chapter = next.sd_chapter_for_page(next.page);
+                    next.selection = next.chapter;
                 } else {
                     next.chapter = wrap_prev(self.chapter, ctx.builtin_chapter_count.max(1));
                     next.selection = next.chapter;
@@ -467,7 +460,16 @@ impl ReaderState {
             }
             (AppView::Chapters, Some(Button::Confirm)) => {
                 next.chapter = self.selection;
-                next.page = 0;
+                next.page = if ReaderSource::from_book_id(self.book_id).is_sd() {
+                    u32::from(
+                        self.sd_chapter_pages
+                            .get(self.selection as usize)
+                            .copied()
+                            .unwrap_or(0),
+                    )
+                } else {
+                    0
+                };
                 next.view = AppView::Reading;
             }
             (AppView::Chapters, Some(Button::Back)) => {
@@ -820,6 +822,43 @@ mod tests {
     }
 
     #[test]
+    fn sd_chapter_selection_uses_toc_page_target() {
+        let mut state = ReaderState::boot();
+        state.view = AppView::Reading;
+        state.book_id = ReaderSource::sd(0).book_id();
+        state.sd_page_count = 40;
+        state.sd_chapter_count = 3;
+        state.sd_chapter_pages[0] = 0;
+        state.sd_chapter_pages[1] = 12;
+        state.sd_chapter_pages[2] = 24;
+
+        let state = press(state, Button::Confirm);
+        let state = press(press(state, Button::Next), Button::Confirm);
+
+        assert_eq!(state.view, AppView::Reading);
+        assert_eq!(state.chapter, 1);
+        assert_eq!(state.page, 12);
+    }
+
+    #[test]
+    fn sd_page_navigation_tracks_chapter_without_wrapping_pages() {
+        let mut state = ReaderState::boot();
+        state.view = AppView::Reading;
+        state.book_id = ReaderSource::sd(0).book_id();
+        state.page = 11;
+        state.sd_page_count = 40;
+        state.sd_chapter_count = 3;
+        state.sd_chapter_pages[0] = 0;
+        state.sd_chapter_pages[1] = 12;
+        state.sd_chapter_pages[2] = 24;
+
+        let state = press(state, Button::Next);
+
+        assert_eq!(state.page, 12);
+        assert_eq!(state.chapter, 1);
+    }
+
+    #[test]
     fn catalog_scan_does_not_auto_open_from_files() {
         let state = press(ReaderState::boot(), Button::Confirm);
         assert_eq!(state.view, AppView::Library);
@@ -829,6 +868,18 @@ mod tests {
         assert_eq!(state.view, AppView::Library);
         assert_eq!(state.library_count, 2);
         assert!(!state.read_request_pending);
+    }
+
+    #[test]
+    fn library_confirm_before_scan_stays_in_files() {
+        let state = press(ReaderState::boot(), Button::Confirm);
+        let state = press(state, Button::Confirm);
+        assert_eq!(state.view, AppView::Library);
+        assert_eq!(state.book_id, 1);
+
+        let state = state.apply_library_event(CTX, LibraryEvent::Scanned { count: 2 });
+        assert_eq!(state.view, AppView::Library);
+        assert_eq!(state.library_count, 2);
     }
 
     #[test]

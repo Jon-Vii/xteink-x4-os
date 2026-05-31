@@ -5,9 +5,18 @@ use miniz_oxide::inflate::decompress_slice_iter_to_slice;
 use miniz_oxide::inflate::stream::{inflate, InflateState};
 use miniz_oxide::{DataFormat, MZFlush, MZStatus};
 
+#[cfg(target_pointer_width = "32")]
+pub const MAX_SPINE_ITEMS: usize = 96;
+#[cfg(not(target_pointer_width = "32"))]
 pub const MAX_SPINE_ITEMS: usize = 128;
+#[cfg(target_pointer_width = "32")]
+pub const MAX_MANIFEST_ITEMS: usize = 128;
+#[cfg(not(target_pointer_width = "32"))]
 pub const MAX_MANIFEST_ITEMS: usize = 160;
 pub const MAX_ENTRY_NAME_BYTES: usize = 160;
+const ZIP_TAIL_READ_WINDOW: usize = 512;
+const ZIP_EOCD_MIN_BYTES: u32 = 22;
+const ZIP_EOCD_OVERLAP_BYTES: u32 = ZIP_EOCD_MIN_BYTES - 1;
 
 pub trait ByteStream {
     type Error;
@@ -100,10 +109,11 @@ pub struct OwnedZipEntry {
     pub local_header_offset: u32,
 }
 
-pub struct ZipStream<R> {
+pub struct ZipStream<'a, R> {
     reader: R,
     central_offset: u32,
     entry_count: u16,
+    central_cache: Option<&'a [u8]>,
 }
 
 pub struct ZipInflateScratch {
@@ -124,27 +134,51 @@ impl Default for ZipInflateScratch {
     }
 }
 
-impl<R> ZipStream<R>
+impl<'a, R> ZipStream<'a, R>
 where
     R: ReadAt,
 {
-    pub fn new(mut reader: R, tail_scratch: &mut [u8]) -> Result<Self, ZipError> {
+    pub fn new(mut reader: R, tail_scratch: &'a mut [u8]) -> Result<Self, ZipError> {
         let len = reader.len().map_err(|_| ZipError::Io)?;
-        if len < 22 {
+        if len < ZIP_EOCD_MIN_BYTES || tail_scratch.len() < ZIP_EOCD_MIN_BYTES as usize {
             return Err(ZipError::MissingEndOfCentralDirectory);
         }
-        let tail_len = tail_scratch.len().min(len as usize);
-        let tail_offset = len - tail_len as u32;
-        read_exact_at(&mut reader, tail_offset, &mut tail_scratch[..tail_len])?;
-        let eocd_in_tail =
-            find_eocd(&tail_scratch[..tail_len]).ok_or(ZipError::MissingEndOfCentralDirectory)?;
-        let eocd = eocd_in_tail;
-        let entry_count = read_u16(tail_scratch, eocd + 10)?;
-        let central_offset = read_u32(tail_scratch, eocd + 16)?;
+        let search_floor = len.saturating_sub(tail_scratch.len() as u32);
+        let read_window = tail_scratch.len().min(ZIP_TAIL_READ_WINDOW);
+        let mut chunk_end = len;
+        let (entry_count, central_size, central_offset) = loop {
+            let available = chunk_end.saturating_sub(search_floor) as usize;
+            let chunk_len = available.min(read_window);
+            if chunk_len < ZIP_EOCD_MIN_BYTES as usize {
+                return Err(ZipError::MissingEndOfCentralDirectory);
+            }
+            let chunk_start = chunk_end - chunk_len as u32;
+            let chunk = &mut tail_scratch[..chunk_len];
+            read_exact_at(&mut reader, chunk_start, chunk)?;
+            if let Some(eocd) = find_eocd(chunk) {
+                break (
+                    read_u16(chunk, eocd + 10)?,
+                    read_u32(chunk, eocd + 12)?,
+                    read_u32(chunk, eocd + 16)?,
+                );
+            }
+            if chunk_start == search_floor {
+                return Err(ZipError::MissingEndOfCentralDirectory);
+            }
+            chunk_end = chunk_start + ZIP_EOCD_OVERLAP_BYTES;
+        };
+        let central_cache = if central_size as usize <= tail_scratch.len() {
+            let central = &mut tail_scratch[..central_size as usize];
+            read_exact_at(&mut reader, central_offset, central)?;
+            Some(&central[..])
+        } else {
+            None
+        };
         Ok(Self {
             reader,
             central_offset,
             entry_count,
+            central_cache,
         })
     }
 
@@ -154,6 +188,9 @@ where
         header_scratch: &mut [u8; 46],
         name_scratch: &mut [u8],
     ) -> Result<OwnedZipEntry, ZipError> {
+        if let Some(central) = self.central_cache {
+            return find_entry_in_central_cache(central, self.entry_count, name, name_scratch);
+        }
         let mut cursor = self.central_offset;
         for _ in 0..self.entry_count {
             read_exact_at(&mut self.reader, cursor, header_scratch)?;
@@ -347,6 +384,58 @@ where
             .checked_add(30 + name_len + extra_len)
             .ok_or(ZipError::BadLocalHeader)
     }
+}
+
+fn find_entry_in_central_cache(
+    central: &[u8],
+    entry_count: u16,
+    name: &str,
+    name_scratch: &mut [u8],
+) -> Result<OwnedZipEntry, ZipError> {
+    let mut cursor = 0usize;
+    for _ in 0..entry_count {
+        if read_u32(central, cursor)? != 0x0201_4b50 {
+            return Err(ZipError::BadCentralDirectory);
+        }
+        let compression_method = read_u16(central, cursor + 10)?;
+        let compressed_size = read_u32(central, cursor + 20)?;
+        let uncompressed_size = read_u32(central, cursor + 24)?;
+        let name_len = read_u16(central, cursor + 28)? as usize;
+        let extra_len = read_u16(central, cursor + 30)? as usize;
+        let comment_len = read_u16(central, cursor + 32)? as usize;
+        let local_header_offset = read_u32(central, cursor + 42)?;
+        if name_len > name_scratch.len() {
+            return Err(ZipError::EntryBufferTooSmall);
+        }
+
+        let name_start = cursor
+            .checked_add(46)
+            .ok_or(ZipError::BadCentralDirectory)?;
+        let name_end = name_start
+            .checked_add(name_len)
+            .ok_or(ZipError::BadCentralDirectory)?;
+        let entry_name = central
+            .get(name_start..name_end)
+            .ok_or(ZipError::BadCentralDirectory)?;
+        name_scratch[..name_len].copy_from_slice(entry_name);
+        if core::str::from_utf8(&name_scratch[..name_len])
+            .map(|entry_name| entry_name == name)
+            .unwrap_or(false)
+        {
+            return Ok(OwnedZipEntry {
+                compression_method,
+                compressed_size,
+                uncompressed_size,
+                local_header_offset,
+            });
+        }
+
+        cursor = name_end
+            .checked_add(extra_len)
+            .and_then(|value| value.checked_add(comment_len))
+            .ok_or(ZipError::BadCentralDirectory)?;
+    }
+    Err(ZipError::EntryNotFound)
 }
 
 pub struct ZipArchive<'a> {
@@ -652,23 +741,6 @@ pub fn parse_opf<'a>(
     let title = element_text(opf_xml, "title").unwrap_or("Untitled");
     let author = element_text(opf_xml, "creator").unwrap_or("Unknown Author");
 
-    let mut spine_idrefs: Vec<&'a str, MAX_SPINE_ITEMS> = Vec::new();
-    let mut in_spine = false;
-    let mut cursor = XmlCursor::new(opf_xml);
-    while let Some(token) = cursor.next_token() {
-        match token {
-            Token::Start(tag) if tag_name_is(tag, "spine") => in_spine = true,
-            Token::End(tag) if tag_name_is(tag, "spine") => in_spine = false,
-            Token::Start(tag) if in_spine && tag_name_is(tag, "itemref") => {
-                let Some(idref) = attr_value(tag, "idref") else {
-                    continue;
-                };
-                let _ = spine_idrefs.push(idref);
-            }
-            _ => {}
-        }
-    }
-
     let mut manifest = Vec::new();
     let mut in_manifest = false;
     let mut cursor = XmlCursor::new(opf_xml);
@@ -685,7 +757,7 @@ pub fn parse_opf<'a>(
                 };
                 let media_type = attr_value(tag, "media-type").unwrap_or("");
                 let properties = attr_value(tag, "properties").unwrap_or("");
-                if manifest_item_needed(id, href, media_type, properties, &spine_idrefs) {
+                if manifest_item_needed(id, href, media_type, properties, opf_xml) {
                     manifest
                         .push(ManifestItem {
                             id,
@@ -724,6 +796,21 @@ pub fn parse_opf<'a>(
                     .ok();
             }
             _ => {}
+        }
+    }
+    if spine.is_empty() {
+        for item in manifest
+            .iter()
+            .filter(|item| manifest_item_is_reading_candidate(item))
+        {
+            spine
+                .push(SpineItem {
+                    idref: item.id,
+                    href: item.href,
+                    media_type: item.media_type,
+                    properties: item.properties,
+                })
+                .ok();
         }
     }
 
@@ -773,23 +860,64 @@ pub fn xhtml_text_runs<'a>(
     xhtml_text_runs_with_css(xhtml, None, output)
 }
 
+fn manifest_item_is_reading_candidate(item: &ManifestItem<'_>) -> bool {
+    if item.href.is_empty()
+        || item
+            .properties
+            .split_ascii_whitespace()
+            .any(|prop| prop == "nav")
+        || item
+            .media_type
+            .eq_ignore_ascii_case("application/x-dtbncx+xml")
+        || item.href.ends_with(".ncx")
+        || item.href.ends_with(".css")
+    {
+        return false;
+    }
+    item.media_type
+        .eq_ignore_ascii_case("application/xhtml+xml")
+        || item.href.ends_with(".xhtml")
+        || item.href.ends_with(".html")
+}
+
 fn manifest_item_needed(
     id: &str,
     href: &str,
     media_type: &str,
     properties: &str,
-    spine_idrefs: &Vec<&str, MAX_SPINE_ITEMS>,
+    opf_xml: &str,
 ) -> bool {
-    spine_idrefs.contains(&id)
+    spine_contains_idref(opf_xml, id)
         || properties
             .split_ascii_whitespace()
             .any(|prop| prop == "nav" || prop == "cover-image")
         || media_type.eq_ignore_ascii_case("application/x-dtbncx+xml")
+        || media_type.eq_ignore_ascii_case("application/xhtml+xml")
+        || href.ends_with(".xhtml")
+        || href.ends_with(".html")
         || media_type.contains("css")
         || id == "cover"
         || href.contains("cover")
         || href.ends_with(".ncx")
         || href.ends_with(".css")
+}
+
+fn spine_contains_idref(opf_xml: &str, id: &str) -> bool {
+    let mut in_spine = false;
+    let mut cursor = XmlCursor::new(opf_xml);
+    while let Some(token) = cursor.next_token() {
+        match token {
+            Token::Start(tag) if tag_name_is(tag, "spine") => in_spine = true,
+            Token::End(tag) if tag_name_is(tag, "spine") => in_spine = false,
+            Token::Start(tag) if in_spine && tag_name_is(tag, "itemref") => {
+                if attr_value(tag, "idref") == Some(id) {
+                    return true;
+                }
+            }
+            _ => {}
+        }
+    }
+    false
 }
 
 pub fn xhtml_text_runs_with_css<'a>(
@@ -2491,6 +2619,27 @@ mod tests {
     }
 
     #[test]
+    fn opf_falls_back_to_xhtml_manifest_when_spine_refs_do_not_resolve() {
+        let opf = r#"
+            <package>
+              <metadata><dc:title>Loose Book</dc:title></metadata>
+              <manifest>
+                <item id="nav" href="nav.xhtml" media-type="application/xhtml+xml" properties="nav"/>
+                <item id="chap1" href="text/ch1.xhtml" media-type="application/xhtml+xml"/>
+                <item id="style" href="book.css" media-type="text/css"/>
+              </manifest>
+              <spine><itemref idref="missing"/></spine>
+            </package>
+        "#;
+
+        let package = parse_opf(opf, BookId(11), "/books/loose.epub", 42, "OPS/content.opf")
+            .expect("opf parses");
+
+        assert_eq!(package.spine.len(), 1);
+        assert_eq!(package.spine[0].href, "text/ch1.xhtml");
+    }
+
+    #[test]
     fn xhtml_skips_pagebreaks_comments_and_aria_hidden() {
         let xhtml = r#"
             <body>
@@ -2703,7 +2852,8 @@ mod tests {
     #[test]
     fn zip_stream_reads_stored_entry_by_offset() {
         let zip_bytes = stored_zip(&[("OPS/package.opf", b"<package/>".as_slice())]);
-        let mut stream = ZipStream::new(SliceReader { bytes: &zip_bytes }, &mut [0u8; 512])
+        let mut tail = [0u8; 512];
+        let mut stream = ZipStream::new(SliceReader { bytes: &zip_bytes }, &mut tail)
             .expect("stream zip parses");
         let entry = stream
             .find_entry("OPS/package.opf", &mut [0u8; 46], &mut [0u8; 64])
@@ -2726,7 +2876,8 @@ mod tests {
             77, 74, 45, 82, 240, 25, 21, 31, 22, 226, 0,
         ];
         let zip_bytes = zip_with_methods(&[("OPS/chapter.xhtml", 8, deflated, plain.as_slice())]);
-        let mut stream = ZipStream::new(SliceReader { bytes: &zip_bytes }, &mut [0u8; 512])
+        let mut tail = [0u8; 512];
+        let mut stream = ZipStream::new(SliceReader { bytes: &zip_bytes }, &mut tail)
             .expect("stream zip parses");
         let entry = stream
             .find_entry("OPS/chapter.xhtml", &mut [0u8; 46], &mut [0u8; 64])
@@ -2745,7 +2896,8 @@ mod tests {
     #[test]
     fn zip_stream_returns_partial_prefix_when_output_fills() {
         let zip_bytes = stored_zip(&[("OPS/chapter.xhtml", b"0123456789abcdef".as_slice())]);
-        let mut stream = ZipStream::new(SliceReader { bytes: &zip_bytes }, &mut [0u8; 512])
+        let mut tail = [0u8; 512];
+        let mut stream = ZipStream::new(SliceReader { bytes: &zip_bytes }, &mut tail)
             .expect("stream zip parses");
         let entry = stream
             .find_entry("OPS/chapter.xhtml", &mut [0u8; 46], &mut [0u8; 64])

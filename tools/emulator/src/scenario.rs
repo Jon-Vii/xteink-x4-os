@@ -39,6 +39,8 @@ struct Expect {
     last_refresh: Option<String>,
     panel_sleeping: Option<bool>,
     history_contains: Option<String>,
+    pending_storage: Option<String>,
+    reader_status: Option<String>,
 }
 
 impl Scenario {
@@ -127,6 +129,23 @@ impl Scenario {
         if let Some(needle) = &self.expect.history_contains {
             if !emu.panel().history().iter().any(|entry| entry.contains(needle)) {
                 return Err(format!("panel history does not contain {needle:?}"));
+            }
+        }
+        if let Some(expected) = &self.expect.pending_storage {
+            let actual = emu.pending_storage_name();
+            if actual != Some(expected.as_str()) {
+                return Err(format!(
+                    "expected pending_storage {expected:?}, got {:?}",
+                    actual
+                ));
+            }
+        }
+        if let Some(expected) = &self.expect.reader_status {
+            let actual = emu.reader_status_name();
+            if actual != expected {
+                return Err(format!(
+                    "expected reader_status {expected:?}, got {actual:?}"
+                ));
             }
         }
         Ok(())

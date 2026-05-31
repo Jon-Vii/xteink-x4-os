@@ -22,6 +22,8 @@ pub(crate) type Epd = hal_ext::spi_dma::EpdBus<
     Output<'static>,
 >;
 
+const EPD_RAM_CHUNK_BYTES: usize = 256;
+
 pub(crate) async fn init_panel(epd: &mut Epd) {
     for op in INIT_SEQUENCE {
         match *op {
@@ -111,7 +113,7 @@ async fn write_ram(
     let mut result = Ok(());
     while y < HEIGHT {
         let len = fill_transformed_band(fb, y, tx_band);
-        if let Err(err) = epd.ram_chunk(&tx_band[..len]).await {
+        if let Err(err) = write_ram_bytes(epd, &tx_band[..len]).await {
             result = Err(err);
             break;
         }
@@ -119,4 +121,17 @@ async fn write_ram(
     }
     epd.end_ram_write();
     result
+}
+
+async fn write_ram_bytes(
+    epd: &mut Epd,
+    bytes: &[u8],
+) -> Result<
+    (),
+    <SpiDmaBus<'static, SPI2, FullDuplexMode, Async> as embedded_hal_async::spi::ErrorType>::Error,
+> {
+    for chunk in bytes.chunks(EPD_RAM_CHUNK_BYTES) {
+        epd.ram_chunk(chunk).await?;
+    }
+    Ok(())
 }

@@ -1,0 +1,25 @@
+[[steps]]
+button = "Confirm"
+
+[[steps]]
+library = "Scanned"
+count = 3
+
+[[steps]]
+button = "Next"
+
+[[steps]]
+button = "Confirm"
+
+[[steps]]
+library = "Loaded"
+book_id = 3
+pages = 5
+chapters = 2
+
+[expect]
+view = "Reading"
+book_id = 3
+page = 0
+pending_storage = "OpenBook"
+reader_status = "Ready"

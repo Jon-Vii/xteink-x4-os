@@ -51,6 +51,7 @@ pub use app_core::{
     AppView, Button, DisplayCommand, DisplayEvent, DisplayOrientation, InputEvent, LibraryEvent,
     PowerEvent, ReaderSource, RefreshPolicy, RenderKind, RenderRequest, StorageCommand,
 };
+use core::sync::atomic::AtomicBool;
 use embassy_executor::Spawner;
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_sync::channel::Channel;
@@ -61,7 +62,7 @@ use esp_hal::gpio::{Input, Io, Level, Output, Pull};
 use esp_hal::peripherals::ADC1;
 use esp_hal::prelude::*;
 use esp_hal::spi::master::Spi;
-use esp_hal::timer::timg::TimerGroup;
+use esp_hal::timer::{timg::TimerGroup, AnyTimer};
 use esp_hal_embassy::Executor;
 use static_cell::StaticCell;
 use tasks::input::InputPins;
@@ -78,8 +79,10 @@ pub mod tasks;
 mod views;
 
 pub static INPUT_EVENTS: Channel<CriticalSectionRawMutex, InputEvent, 8> = Channel::new();
-pub static DISPLAY_COMMANDS: Channel<CriticalSectionRawMutex, DisplayCommand, 1> = Channel::new();
-pub static DISPLAY_EVENTS: Channel<CriticalSectionRawMutex, DisplayEvent, 4> = Channel::new();
+pub static INPUT_START: Channel<CriticalSectionRawMutex, (), 1> = Channel::new();
+pub static INPUT_ENABLED: AtomicBool = AtomicBool::new(false);
+pub static DISPLAY_COMMANDS: Channel<CriticalSectionRawMutex, DisplayCommand, 4> = Channel::new();
+pub static DISPLAY_EVENTS: Channel<CriticalSectionRawMutex, DisplayEvent, 16> = Channel::new();
 pub static LIBRARY_EVENTS: Channel<CriticalSectionRawMutex, LibraryEvent, 64> = Channel::new();
 pub static STORAGE_COMMANDS: Channel<CriticalSectionRawMutex, StorageCommand, 4> = Channel::new();
 pub static POWER_EVENTS: Channel<CriticalSectionRawMutex, PowerEvent, 4> = Channel::new();
@@ -97,8 +100,9 @@ fn main() -> ! {
     let peripherals = esp_hal::init(esp_hal::Config::default());
     esp_println::println!("xteink-x4-os: boot");
 
-    let timers = TimerGroup::new(peripherals.TIMG0);
-    esp_hal_embassy::init(timers.timer0);
+    let timg0 = TimerGroup::new(peripherals.TIMG0);
+    let timg1 = TimerGroup::new(peripherals.TIMG1);
+    esp_hal_embassy::init([AnyTimer::from(timg0.timer0), AnyTimer::from(timg1.timer0)]);
 
     let io = Io::new(peripherals.GPIO, peripherals.IO_MUX);
     let epd_cs = Output::new(io.pins.gpio21, Level::High);
@@ -134,8 +138,9 @@ fn main() -> ! {
 
     let executor = EXECUTOR.init(Executor::new());
     executor.run(|spawner: Spawner| {
-        spawner.spawn(tasks::app::run()).unwrap();
+        esp_println::println!("main: spawn display");
         spawner.spawn(tasks::display::run(epd_bus, sd_cs)).unwrap();
+        esp_println::println!("main: spawn input");
         spawner
             .spawn(tasks::input::run(
                 adc1,
@@ -147,7 +152,9 @@ fn main() -> ! {
                 },
             ))
             .unwrap();
-        spawner.spawn(tasks::power::run(peripherals.LPWR)).unwrap();
-        spawner.spawn(tasks::wifi::run(peripherals.WIFI)).unwrap();
+        let _lpwr = peripherals.LPWR;
+        let _wifi = peripherals.WIFI;
+        esp_println::println!("main: spawn app");
+        spawner.spawn(tasks::app::run()).unwrap();
     })
 }

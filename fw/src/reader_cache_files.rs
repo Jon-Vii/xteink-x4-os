@@ -1,17 +1,43 @@
 use crate::reader_store::ReaderStore;
+use crate::reader_store::{EMPTY_BOOK_SECTION_RECORD, MAX_BOOK_SECTIONS};
 use display::font::FontStyle;
 use embedded_sdmmc::{Directory, File, Mode, TimeSource};
 use heapless::String;
 use proto::cache::{
-    decode_block, decode_cover_header, decode_page, decode_section_header, encode_block,
-    encode_book_header, encode_page, encode_section_header, encode_spine, encode_toc,
-    section_file_name, BookCacheHeader, SectionHeader, SpineRecord, TocRecord as CacheTocRecord,
-    BLOCK_RECORD_BYTES, BOOK_HEADER_BYTES, CACHE_BOOK_FILE, CACHE_COVER_FILE, CACHE_DIR,
-    CACHE_ROOT_DIR, CACHE_SECTIONS_DIR, CACHE_SECTION_FILE_BYTES, CACHE_STATE_FILE, COVER_BYTES,
-    PAGE_RECORD_BYTES, SECTION_HEADER_BYTES, SPINE_RECORD_BYTES, TOC_RECORD_BYTES,
+    decode_block, decode_book_v2_header, decode_book_v2_section, decode_page,
+    decode_section_header, decode_section_v2_header, encode_block, encode_book_v2_header,
+    encode_book_v2_section, encode_page, encode_section_v2_header, section_file_name, BookV2Header,
+    BookV2SectionRecord, SectionV2Header, BLOCK_RECORD_BYTES, BOOK_V2_HEADER_BYTES,
+    BOOK_V2_SECTION_RECORD_BYTES, CACHE_BOOK_FILE, CACHE_DIR, CACHE_ROOT_DIR, CACHE_SECTIONS_DIR,
+    CACHE_SECTION_FILE_BYTES, CACHE_STATE_FILE, CACHE_V2_DIR, PAGE_RECORD_BYTES,
+    SECTION_HEADER_BYTES, SECTION_V2_HEADER_BYTES,
 };
 
-pub(crate) fn ensure_cache_dirs<
+const MIGRATE_MAX_SECTIONS: u16 = 16;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum CacheLoadResult {
+    Hit { pages: usize },
+    Miss,
+    Invalid,
+    TooShort { pages: usize },
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum BookIndexLoadResult {
+    Hit,
+    Miss,
+    Invalid,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum MigrationResult {
+    Migrated,
+    Skipped,
+    Invalid,
+}
+
+pub(crate) fn ensure_v2_cache_dirs<
     D,
     T,
     const MAX_DIRS: usize,
@@ -26,7 +52,7 @@ where
     T: TimeSource,
 {
     let xteink = open_or_make_dir(root, CACHE_ROOT_DIR)?;
-    let cache = open_or_make_dir(&xteink, CACHE_DIR)?;
+    let cache = open_or_make_dir(&xteink, CACHE_V2_DIR)?;
     let book = open_or_make_dir(&cache, key)?;
     let _ = open_or_make_dir(&book, CACHE_SECTIONS_DIR)?;
     Ok(())
@@ -53,6 +79,154 @@ where
     file.write(&record.encode()).map_err(|_| ())
 }
 
+pub(crate) fn load_v2_book_index<
+    D,
+    T,
+    const MAX_DIRS: usize,
+    const MAX_FILES: usize,
+    const MAX_VOLUMES: usize,
+>(
+    root: &Directory<'_, D, T, MAX_DIRS, MAX_FILES, MAX_VOLUMES>,
+    key: &str,
+    source_identity: (u32, u32),
+    library: &mut ReaderStore,
+) -> BookIndexLoadResult
+where
+    D: embedded_sdmmc::BlockDevice,
+    T: TimeSource,
+{
+    with_v2_book_file(root, key, Mode::ReadOnly, |file| {
+        let mut header_bytes = [0u8; BOOK_V2_HEADER_BYTES];
+        if read_exact_file(file, &mut header_bytes).is_err() {
+            return BookIndexLoadResult::Invalid;
+        }
+        let Ok(header) = decode_book_v2_header(&header_bytes) else {
+            return BookIndexLoadResult::Invalid;
+        };
+        if header.source_hash != source_identity.0
+            || header.source_size != source_identity.1
+            || header.section_count as usize > MAX_BOOK_SECTIONS
+            || header.total_pages == 0
+        {
+            return BookIndexLoadResult::Invalid;
+        }
+        let mut sections = [EMPTY_BOOK_SECTION_RECORD; MAX_BOOK_SECTIONS];
+        for slot in sections.iter_mut().take(header.section_count as usize) {
+            let mut record_bytes = [0u8; BOOK_V2_SECTION_RECORD_BYTES];
+            if read_exact_file(file, &mut record_bytes).is_err() {
+                return BookIndexLoadResult::Invalid;
+            }
+            let Ok(record) = decode_book_v2_section(&record_bytes) else {
+                return BookIndexLoadResult::Invalid;
+            };
+            if record.page_count == 0 {
+                return BookIndexLoadResult::Invalid;
+            }
+            *slot = record;
+        }
+        library.set_book_index(
+            header.total_pages,
+            header.partial,
+            &sections[..header.section_count as usize],
+        );
+        BookIndexLoadResult::Hit
+    })
+    .unwrap_or(BookIndexLoadResult::Miss)
+}
+
+pub(crate) fn write_v2_book_index<
+    D,
+    T,
+    const MAX_DIRS: usize,
+    const MAX_FILES: usize,
+    const MAX_VOLUMES: usize,
+>(
+    root: &Directory<'_, D, T, MAX_DIRS, MAX_FILES, MAX_VOLUMES>,
+    key: &str,
+    source_identity: (u32, u32),
+    total_pages: u32,
+    sections: &[BookV2SectionRecord],
+    partial: bool,
+) -> bool
+where
+    D: embedded_sdmmc::BlockDevice,
+    T: TimeSource,
+{
+    if total_pages == 0 || sections.is_empty() || sections.len() > MAX_BOOK_SECTIONS {
+        return false;
+    }
+    if ensure_v2_cache_dirs(root, key).is_err() {
+        return false;
+    }
+    with_v2_book_file(root, key, Mode::ReadWriteCreateOrTruncate, |file| {
+        let header = BookV2Header {
+            source_hash: source_identity.0,
+            source_size: source_identity.1,
+            total_pages,
+            section_count: sections.len().min(u16::MAX as usize) as u16,
+            spine_count: sections
+                .iter()
+                .map(|section| section.spine as usize + 1)
+                .max()
+                .unwrap_or(0)
+                .min(u16::MAX as usize) as u16,
+            toc_count: 0,
+            viewport_width: 800,
+            viewport_height: 480,
+            font_config: 1,
+            partial,
+        };
+        let mut bytes = [0u8; BOOK_V2_HEADER_BYTES];
+        if encode_book_v2_header(header, &mut bytes).is_err() || file.write(&bytes).is_err() {
+            return false;
+        }
+        let mut record_bytes = [0u8; BOOK_V2_SECTION_RECORD_BYTES];
+        for section in sections {
+            if encode_book_v2_section(*section, &mut record_bytes).is_err()
+                || file.write(&record_bytes).is_err()
+            {
+                return false;
+            }
+        }
+        true
+    })
+    .unwrap_or(false)
+}
+
+pub(crate) fn load_v2_section_by_global_page<
+    D,
+    T,
+    const MAX_DIRS: usize,
+    const MAX_FILES: usize,
+    const MAX_VOLUMES: usize,
+>(
+    root: &Directory<'_, D, T, MAX_DIRS, MAX_FILES, MAX_VOLUMES>,
+    key: &str,
+    source_identity: (u32, u32),
+    global_page: u32,
+    library: &mut ReaderStore,
+) -> CacheLoadResult
+where
+    D: embedded_sdmmc::BlockDevice,
+    T: TimeSource,
+{
+    let Some(section) = library.section_for_global_page(global_page) else {
+        return CacheLoadResult::Miss;
+    };
+    let result = load_v2_section_cache(
+        root,
+        key,
+        source_identity,
+        section.section,
+        section.page_count as usize,
+        library,
+    );
+    if matches!(result, CacheLoadResult::Hit { .. }) {
+        library.set_current_section_range(section.start_page, section.page_count as usize);
+    }
+    result
+}
+
 fn open_or_make_dir<
     'a,
     D,
@@ -77,7 +251,7 @@ where
     }
 }
 
-pub(crate) fn write_book_cache<
+pub(crate) fn load_v2_section_cache<
     D,
     T,
     const MAX_DIRS: usize,
@@ -86,101 +260,188 @@ pub(crate) fn write_book_cache<
 >(
     root: &Directory<'_, D, T, MAX_DIRS, MAX_FILES, MAX_VOLUMES>,
     key: &str,
-    package: &proto::epub::EpubPackage<'_>,
-    library: &ReaderStore,
-) where
+    source_identity: (u32, u32),
+    spine: u16,
+    target_pages: usize,
+    library: &mut ReaderStore,
+) -> CacheLoadResult
+where
     D: embedded_sdmmc::BlockDevice,
     T: TimeSource,
 {
-    let Ok(xteink) = root.open_dir(CACHE_ROOT_DIR) else {
-        return;
-    };
-    let Ok(cache) = xteink.open_dir(CACHE_DIR) else {
-        return;
-    };
-    let Ok(book_dir) = cache.open_dir(key) else {
-        return;
-    };
-    let Ok(file) = book_dir.open_file_in_dir(CACHE_BOOK_FILE, Mode::ReadWriteCreateOrTruncate)
-    else {
-        return;
-    };
-    let string_bytes = book_string_bytes(package, library);
-    let header = BookCacheHeader {
-        spine_count: package.spine.len().min(u16::MAX as usize) as u16,
-        toc_count: library.toc_count.min(u16::MAX as usize) as u16,
-        string_bytes,
-    };
-    let mut record = [0u8; TOC_RECORD_BYTES];
-    if encode_book_header(header, &mut record[..BOOK_HEADER_BYTES]).is_err()
-        || file.write(&record[..BOOK_HEADER_BYTES]).is_err()
-    {
-        return;
-    }
-
-    let mut offset = book_meta_string_bytes(package);
-    for (spine_index, spine) in package.spine.iter().enumerate() {
-        let href_len = spine.href.len().min(u16::MAX as usize) as u16;
-        let toc_index = library
-            .toc
-            .iter()
-            .take(library.toc_count)
-            .position(|toc| toc.spine_index == spine_index as i16)
-            .map(|index| index as i16)
-            .unwrap_or(-1);
-        let spine_record = SpineRecord {
-            href_offset: offset,
-            href_len,
-            toc_index,
-            byte_size: 0,
-        };
-        if encode_spine(spine_record, &mut record[..SPINE_RECORD_BYTES]).is_err()
-            || file.write(&record[..SPINE_RECORD_BYTES]).is_err()
-        {
-            return;
+    with_v2_section_file(root, key, spine, Mode::ReadOnly, |file| {
+        let mut header_bytes = [0u8; SECTION_V2_HEADER_BYTES];
+        if read_exact_file(file, &mut header_bytes).is_err() {
+            return CacheLoadResult::Invalid;
         }
-        offset = offset.saturating_add(href_len as u32);
-    }
-
-    for toc in library.toc.iter().take(library.toc_count).copied() {
-        let title_offset = offset;
-        offset = offset.saturating_add(toc.title_len as u32);
-        let href_offset = offset;
-        offset = offset.saturating_add(toc.href_len as u32);
-        let cache_toc = CacheTocRecord {
-            title_offset,
-            title_len: toc.title_len,
-            href_offset,
-            href_len: toc.href_len,
-            anchor_offset: 0,
-            anchor_len: 0,
-            level: toc.level,
-            spine_index: toc.spine_index,
+        let Ok(header) = decode_section_v2_header(&header_bytes) else {
+            return CacheLoadResult::Invalid;
         };
-        if encode_toc(cache_toc, &mut record[..TOC_RECORD_BYTES]).is_err()
-            || file.write(&record[..TOC_RECORD_BYTES]).is_err()
+        if header.source_hash != source_identity.0
+            || header.source_size != source_identity.1
+            || header.spine != spine
         {
-            return;
+            return CacheLoadResult::Invalid;
+        }
+        if !load_v2_section_body(file, header, library) {
+            return CacheLoadResult::Invalid;
+        }
+        let pages = header.page_count as usize;
+        if pages < target_pages {
+            CacheLoadResult::TooShort { pages }
+        } else {
+            CacheLoadResult::Hit { pages }
+        }
+    })
+    .unwrap_or(CacheLoadResult::Miss)
+}
+
+pub(crate) fn write_v2_section_cache<
+    D,
+    T,
+    const MAX_DIRS: usize,
+    const MAX_FILES: usize,
+    const MAX_VOLUMES: usize,
+>(
+    root: &Directory<'_, D, T, MAX_DIRS, MAX_FILES, MAX_VOLUMES>,
+    key: &str,
+    source_identity: (u32, u32),
+    spine: u16,
+    library: &ReaderStore,
+) -> bool
+where
+    D: embedded_sdmmc::BlockDevice,
+    T: TimeSource,
+{
+    if ensure_v2_cache_dirs(root, key).is_err() {
+        esp_println::println!("cache: v2 ensure dirs failed key={}", key);
+        return false;
+    }
+    with_v2_section_file(root, key, spine, Mode::ReadWriteCreateOrTruncate, |file| {
+        write_v2_section_body(file, source_identity, spine, library)
+    })
+    .unwrap_or_else(|| {
+        esp_println::println!("cache: v2 open section failed key={} spine={}", key, spine);
+        false
+    })
+}
+
+pub(crate) fn migrate_v1_cache_for_entry<
+    D,
+    T,
+    const MAX_DIRS: usize,
+    const MAX_FILES: usize,
+    const MAX_VOLUMES: usize,
+>(
+    root: &Directory<'_, D, T, MAX_DIRS, MAX_FILES, MAX_VOLUMES>,
+    key: &str,
+    source_identity: (u32, u32),
+) -> MigrationResult
+where
+    D: embedded_sdmmc::BlockDevice,
+    T: TimeSource,
+{
+    let mut saw_v1 = false;
+    let mut migrated = false;
+    let mut invalid = false;
+    for spine in 0..MIGRATE_MAX_SECTIONS {
+        if with_v2_section_file(root, key, spine, Mode::ReadOnly, |_| ()).is_some() {
+            continue;
+        }
+        let Some(result) = with_v1_section_file(root, key, spine, Mode::ReadOnly, |v1_file| {
+            migrate_v1_section_file(root, key, source_identity, spine, v1_file)
+        }) else {
+            continue;
+        };
+        saw_v1 = true;
+        match result {
+            MigrationResult::Migrated => migrated = true,
+            MigrationResult::Invalid => invalid = true,
+            MigrationResult::Skipped => {}
         }
     }
-
-    let _ = file.write(package.meta.title.as_bytes());
-    let _ = file.write(&[0]);
-    let _ = file.write(package.meta.author.as_bytes());
-    let _ = file.write(&[0]);
-    let _ = file.write(package.meta.source_path.as_bytes());
-    let _ = file.write(&[0]);
-    for spine in package.spine.iter() {
-        let _ = file.write(spine.href.as_bytes());
-    }
-    for index in 0..library.toc_count {
-        let _ = file.write(library.toc_title(index).as_bytes());
-        let href = library.toc_href(index);
-        let _ = file.write(href.as_bytes());
+    if migrated {
+        MigrationResult::Migrated
+    } else if invalid {
+        MigrationResult::Invalid
+    } else if saw_v1 {
+        MigrationResult::Skipped
+    } else {
+        MigrationResult::Skipped
     }
 }
 
-pub(crate) fn load_section_cache<
+fn migrate_v1_section_file<
+    D,
+    T,
+    const MAX_DIRS: usize,
+    const MAX_FILES: usize,
+    const MAX_VOLUMES: usize,
+>(
+    root: &Directory<'_, D, T, MAX_DIRS, MAX_FILES, MAX_VOLUMES>,
+    key: &str,
+    source_identity: (u32, u32),
+    spine: u16,
+    v1_file: &File<'_, D, T, MAX_DIRS, MAX_FILES, MAX_VOLUMES>,
+) -> MigrationResult
+where
+    D: embedded_sdmmc::BlockDevice,
+    T: TimeSource,
+{
+    let mut header_bytes = [0u8; SECTION_HEADER_BYTES];
+    if read_exact_file(v1_file, &mut header_bytes).is_err() {
+        return MigrationResult::Invalid;
+    }
+    let Ok(v1) = decode_section_header(&header_bytes) else {
+        return MigrationResult::Invalid;
+    };
+    let body_bytes = v1.page_count as usize * PAGE_RECORD_BYTES
+        + v1.block_count as usize * BLOCK_RECORD_BYTES
+        + v1.block_count as usize
+        + v1.text_bytes as usize;
+    if body_bytes > 24_576 {
+        return MigrationResult::Invalid;
+    }
+    if ensure_v2_cache_dirs(root, key).is_err() {
+        return MigrationResult::Skipped;
+    }
+    let v2 = SectionV2Header {
+        source_hash: source_identity.0,
+        source_size: source_identity.1,
+        spine,
+        page_count: v1.page_count,
+        block_count: v1.block_count,
+        text_bytes: v1.text_bytes,
+        viewport_width: v1.viewport_width,
+        viewport_height: v1.viewport_height,
+        font_config: v1.font_config,
+        bytes_consumed: v1.bytes_consumed,
+        total_bytes: v1.total_bytes,
+        partial: v1.partial,
+    };
+    with_v2_section_file(
+        root,
+        key,
+        spine,
+        Mode::ReadWriteCreateOrTruncate,
+        |v2_file| {
+            let mut v2_header = [0u8; SECTION_V2_HEADER_BYTES];
+            if encode_section_v2_header(v2, &mut v2_header).is_err()
+                || v2_file.write(&v2_header).is_err()
+            {
+                return MigrationResult::Skipped;
+            }
+            if copy_file_bytes(v1_file, v2_file, body_bytes).is_err() {
+                return MigrationResult::Invalid;
+            }
+            MigrationResult::Migrated
+        },
+    )
+    .unwrap_or(MigrationResult::Skipped)
+}
+
+fn with_v1_section_file<
+    R,
     D,
     T,
     const MAX_DIRS: usize,
@@ -190,8 +451,9 @@ pub(crate) fn load_section_cache<
     root: &Directory<'_, D, T, MAX_DIRS, MAX_FILES, MAX_VOLUMES>,
     key: &str,
     spine: u16,
-    library: &mut ReaderStore,
-) -> Option<usize>
+    mode: Mode,
+    f: impl for<'a> FnOnce(&File<'a, D, T, MAX_DIRS, MAX_FILES, MAX_VOLUMES>) -> R,
+) -> Option<R>
 where
     D: embedded_sdmmc::BlockDevice,
     T: TimeSource,
@@ -202,115 +464,12 @@ where
     let sections = book_dir.open_dir(CACHE_SECTIONS_DIR).ok()?;
     let mut name = String::<CACHE_SECTION_FILE_BYTES>::new();
     section_file_name(spine, &mut name);
-    let file = sections
-        .open_file_in_dir(name.as_str(), Mode::ReadOnly)
-        .ok()?;
-    let mut header_bytes = [0u8; SECTION_HEADER_BYTES];
-    read_exact_file(&file, &mut header_bytes).ok()?;
-    let header = decode_section_header(&header_bytes).ok()?;
-    let page_count = header.page_count as usize;
-    let block_count = header.block_count as usize;
-    let text_bytes = header.text_bytes as usize;
-    if !library.can_hold_section(page_count, block_count, text_bytes) {
-        return None;
-    }
-
-    let mut record_bytes = [0u8; 16];
-    for index in 0..page_count {
-        read_exact_file(&file, &mut record_bytes[..PAGE_RECORD_BYTES]).ok()?;
-        let page = decode_page(&record_bytes[..PAGE_RECORD_BYTES]).ok()?;
-        if !library.set_cached_page(index, page, spine) {
-            return None;
-        }
-    }
-    for index in 0..block_count {
-        read_exact_file(&file, &mut record_bytes[..BLOCK_RECORD_BYTES]).ok()?;
-        let block = decode_block(&record_bytes[..BLOCK_RECORD_BYTES]).ok()?;
-        if !library.set_cached_block(
-            index,
-            block,
-            display_style_for_proto_style(block.style),
-            spine,
-        ) {
-            return None;
-        }
-    }
-    for index in 0..block_count {
-        let mut flag = [0u8; 1];
-        read_exact_file(&file, &mut flag).ok()?;
-        if !library.set_cached_paragraph_end(index, flag[0] != 0) {
-            return None;
-        }
-    }
-    read_exact_file(&file, library.cached_text_mut(text_bytes)?).ok()?;
-    library.finish_cached_section(spine, page_count, block_count, text_bytes, header.partial);
-    Some(page_count)
+    let file = sections.open_file_in_dir(name.as_str(), mode).ok()?;
+    Some(f(&file))
 }
 
-pub(crate) fn load_cover_cache<
-    D,
-    T,
-    const MAX_DIRS: usize,
-    const MAX_FILES: usize,
-    const MAX_VOLUMES: usize,
->(
-    root: &Directory<'_, D, T, MAX_DIRS, MAX_FILES, MAX_VOLUMES>,
-    key: &str,
-    library: &mut ReaderStore,
-) where
-    D: embedded_sdmmc::BlockDevice,
-    T: TimeSource,
-{
-    library.clear_cover();
-    let Some((width, height, bits)) = read_cover_cache(root, key, library.cover_bits_mut()) else {
-        return;
-    };
-    if bits == COVER_BYTES {
-        library.set_cover_cache(width, height);
-    }
-}
-
-fn read_cover_cache<D, T, const MAX_DIRS: usize, const MAX_FILES: usize, const MAX_VOLUMES: usize>(
-    root: &Directory<'_, D, T, MAX_DIRS, MAX_FILES, MAX_VOLUMES>,
-    key: &str,
-    out: &mut [u8; COVER_BYTES],
-) -> Option<(u16, u16, usize)>
-where
-    D: embedded_sdmmc::BlockDevice,
-    T: TimeSource,
-{
-    let xteink = root.open_dir(CACHE_ROOT_DIR).ok()?;
-    let cache = xteink.open_dir(CACHE_DIR).ok()?;
-    let book_dir = cache.open_dir(key).ok()?;
-    let file = book_dir
-        .open_file_in_dir(CACHE_COVER_FILE, Mode::ReadOnly)
-        .ok()?;
-    let mut header = [0u8; proto::cache::COVER_HEADER_BYTES];
-    read_exact_file(&file, &mut header).ok()?;
-    let header = decode_cover_header(&header).ok()?;
-    read_exact_file(&file, out).ok()?;
-    Some((header.width, header.height, COVER_BYTES))
-}
-
-fn book_string_bytes(package: &proto::epub::EpubPackage<'_>, library: &ReaderStore) -> u32 {
-    let mut total = book_meta_string_bytes(package);
-    for spine in package.spine.iter() {
-        total = total.saturating_add(spine.href.len().min(u16::MAX as usize) as u32);
-    }
-    for index in 0..library.toc_count {
-        total = total.saturating_add(library.toc_title(index).len().min(u16::MAX as usize) as u32);
-        total = total.saturating_add(library.toc_href(index).len().min(u16::MAX as usize) as u32);
-    }
-    total
-}
-
-fn book_meta_string_bytes(package: &proto::epub::EpubPackage<'_>) -> u32 {
-    package.meta.title.len().saturating_add(1) as u32
-        + package.meta.author.len().saturating_add(1) as u32
-        + package.meta.source_path.len().saturating_add(1) as u32
-}
-
-pub(crate) fn write_section_cache<
+fn with_v2_section_file<
+    R,
     D,
     T,
     const MAX_DIRS: usize,
@@ -320,33 +479,143 @@ pub(crate) fn write_section_cache<
     root: &Directory<'_, D, T, MAX_DIRS, MAX_FILES, MAX_VOLUMES>,
     key: &str,
     spine: u16,
-    library: &ReaderStore,
-) where
+    mode: Mode,
+    f: impl for<'a> FnOnce(&File<'a, D, T, MAX_DIRS, MAX_FILES, MAX_VOLUMES>) -> R,
+) -> Option<R>
+where
     D: embedded_sdmmc::BlockDevice,
     T: TimeSource,
 {
-    let Ok(xteink) = root.open_dir(CACHE_ROOT_DIR) else {
-        return;
-    };
-    let Ok(cache) = xteink.open_dir(CACHE_DIR) else {
-        return;
-    };
-    let Ok(book_dir) = cache.open_dir(key) else {
-        return;
-    };
-    let Ok(sections) = book_dir.open_dir(CACHE_SECTIONS_DIR) else {
-        return;
-    };
+    let xteink = root.open_dir(CACHE_ROOT_DIR).ok()?;
+    let cache = xteink.open_dir(CACHE_V2_DIR).ok()?;
+    let book_dir = cache.open_dir(key).ok()?;
+    let sections = book_dir.open_dir(CACHE_SECTIONS_DIR).ok()?;
     let mut name = String::<CACHE_SECTION_FILE_BYTES>::new();
     section_file_name(spine, &mut name);
-    let Ok(file) = sections.open_file_in_dir(name.as_str(), Mode::ReadWriteCreateOrTruncate) else {
-        return;
+    let file = sections.open_file_in_dir(name.as_str(), mode).ok()?;
+    Some(f(&file))
+}
+
+fn with_v2_book_file<
+    R,
+    D,
+    T,
+    const MAX_DIRS: usize,
+    const MAX_FILES: usize,
+    const MAX_VOLUMES: usize,
+>(
+    root: &Directory<'_, D, T, MAX_DIRS, MAX_FILES, MAX_VOLUMES>,
+    key: &str,
+    mode: Mode,
+    f: impl for<'a> FnOnce(&File<'a, D, T, MAX_DIRS, MAX_FILES, MAX_VOLUMES>) -> R,
+) -> Option<R>
+where
+    D: embedded_sdmmc::BlockDevice,
+    T: TimeSource,
+{
+    let xteink = root.open_dir(CACHE_ROOT_DIR).ok()?;
+    let cache = xteink.open_dir(CACHE_V2_DIR).ok()?;
+    let book_dir = cache.open_dir(key).ok()?;
+    let file = book_dir.open_file_in_dir(CACHE_BOOK_FILE, mode).ok()?;
+    Some(f(&file))
+}
+
+fn load_v2_section_body<
+    D,
+    T,
+    const MAX_DIRS: usize,
+    const MAX_FILES: usize,
+    const MAX_VOLUMES: usize,
+>(
+    file: &File<'_, D, T, MAX_DIRS, MAX_FILES, MAX_VOLUMES>,
+    header: SectionV2Header,
+    library: &mut ReaderStore,
+) -> bool
+where
+    D: embedded_sdmmc::BlockDevice,
+    T: TimeSource,
+{
+    let page_count = header.page_count as usize;
+    let block_count = header.block_count as usize;
+    let text_bytes = header.text_bytes as usize;
+    if !library.can_hold_section(page_count, block_count, text_bytes) {
+        return false;
+    }
+    library.clear_lines();
+    let mut record_bytes = [0u8; 16];
+    for index in 0..page_count {
+        if read_exact_file(file, &mut record_bytes[..PAGE_RECORD_BYTES]).is_err() {
+            return false;
+        }
+        let Ok(page) = decode_page(&record_bytes[..PAGE_RECORD_BYTES]) else {
+            return false;
+        };
+        if !library.set_cached_page(index, page, header.spine) {
+            return false;
+        }
+    }
+    for index in 0..block_count {
+        if read_exact_file(file, &mut record_bytes[..BLOCK_RECORD_BYTES]).is_err() {
+            return false;
+        }
+        let Ok(block) = decode_block(&record_bytes[..BLOCK_RECORD_BYTES]) else {
+            return false;
+        };
+        if !library.set_cached_block(
+            index,
+            block,
+            display_style_for_proto_style(block.style),
+            header.spine,
+        ) {
+            return false;
+        }
+    }
+    for index in 0..block_count {
+        let mut flag = [0u8; 1];
+        if read_exact_file(file, &mut flag).is_err()
+            || !library.set_cached_paragraph_end(index, flag[0] != 0)
+        {
+            return false;
+        }
+    }
+    let Some(text) = library.cached_text_mut(text_bytes) else {
+        return false;
     };
-    let header = SectionHeader {
+    if read_exact_file(file, text).is_err() {
+        return false;
+    }
+    library.finish_cached_section(
+        header.spine,
+        page_count,
+        block_count,
+        text_bytes,
+        header.partial,
+    );
+    true
+}
+
+fn write_v2_section_body<
+    D,
+    T,
+    const MAX_DIRS: usize,
+    const MAX_FILES: usize,
+    const MAX_VOLUMES: usize,
+>(
+    file: &File<'_, D, T, MAX_DIRS, MAX_FILES, MAX_VOLUMES>,
+    source_identity: (u32, u32),
+    spine: u16,
+    library: &ReaderStore,
+) -> bool
+where
+    D: embedded_sdmmc::BlockDevice,
+    T: TimeSource,
+{
+    let header = SectionV2Header {
+        source_hash: source_identity.0,
+        source_size: source_identity.1,
+        spine,
         page_count: library.page_count.min(u16::MAX as usize) as u16,
         block_count: library.block_count.min(u16::MAX as usize) as u16,
-        line_count: 0,
-        word_count: 0,
         text_bytes: library.text_len.min(u32::MAX as usize) as u32,
         viewport_width: 800,
         viewport_height: 480,
@@ -355,23 +624,43 @@ pub(crate) fn write_section_cache<
         total_bytes: 0,
         partial: library.section_partial,
     };
-    let mut bytes = [0u8; SECTION_HEADER_BYTES];
-    if encode_section_header(header, &mut bytes).is_err() || file.write(&bytes).is_err() {
-        return;
+    let mut bytes = [0u8; SECTION_V2_HEADER_BYTES];
+    if encode_section_v2_header(header, &mut bytes).is_err() || file.write(&bytes).is_err() {
+        esp_println::println!("cache: v2 write header failed");
+        return false;
     }
+    write_section_records(file, library)
+}
+
+fn write_section_records<
+    D,
+    T,
+    const MAX_DIRS: usize,
+    const MAX_FILES: usize,
+    const MAX_VOLUMES: usize,
+>(
+    file: &File<'_, D, T, MAX_DIRS, MAX_FILES, MAX_VOLUMES>,
+    library: &ReaderStore,
+) -> bool
+where
+    D: embedded_sdmmc::BlockDevice,
+    T: TimeSource,
+{
     let mut record = [0u8; 16];
     for page in library.pages.iter().take(library.page_count) {
         if encode_page(*page, &mut record[..PAGE_RECORD_BYTES]).is_err()
             || file.write(&record[..PAGE_RECORD_BYTES]).is_err()
         {
-            return;
+            esp_println::println!("cache: write page record failed");
+            return false;
         }
     }
     for block in library.blocks.iter().take(library.block_count) {
         if encode_block(*block, &mut record[..BLOCK_RECORD_BYTES]).is_err()
             || file.write(&record[..BLOCK_RECORD_BYTES]).is_err()
         {
-            return;
+            esp_println::println!("cache: write block record failed");
+            return false;
         }
     }
     for flag in library
@@ -381,10 +670,15 @@ pub(crate) fn write_section_cache<
         .copied()
     {
         if file.write(&[flag as u8]).is_err() {
-            return;
+            esp_println::println!("cache: write paragraph flag failed");
+            return false;
         }
     }
-    let _ = file.write(&library.text[..library.text_len]);
+    if file.write(&library.text[..library.text_len]).is_err() {
+        esp_println::println!("cache: write text failed");
+        return false;
+    }
+    true
 }
 
 fn read_exact_file<D, T, const MAX_DIRS: usize, const MAX_FILES: usize, const MAX_VOLUMES: usize>(
@@ -402,6 +696,25 @@ where
         }
         let tmp = out;
         out = &mut tmp[read..];
+    }
+    Ok(())
+}
+
+fn copy_file_bytes<D, T, const MAX_DIRS: usize, const MAX_FILES: usize, const MAX_VOLUMES: usize>(
+    source: &File<'_, D, T, MAX_DIRS, MAX_FILES, MAX_VOLUMES>,
+    target: &File<'_, D, T, MAX_DIRS, MAX_FILES, MAX_VOLUMES>,
+    mut bytes: usize,
+) -> Result<(), ()>
+where
+    D: embedded_sdmmc::BlockDevice,
+    T: TimeSource,
+{
+    let mut scratch = [0u8; 512];
+    while bytes > 0 {
+        let count = bytes.min(scratch.len());
+        read_exact_file(source, &mut scratch[..count])?;
+        target.write(&scratch[..count]).map_err(|_| ())?;
+        bytes -= count;
     }
     Ok(())
 }

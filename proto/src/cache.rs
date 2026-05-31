@@ -3,8 +3,10 @@ use heapless::String;
 
 pub const CACHE_MAGIC: u32 = 0x5834_5244; // X4RD
 pub const CACHE_VERSION: u16 = 1;
+pub const CACHE_V2_VERSION: u16 = 3;
 pub const CACHE_ROOT_DIR: &str = "XTEINK";
 pub const CACHE_DIR: &str = "CACHE";
+pub const CACHE_V2_DIR: &str = "CACHE2";
 pub const CACHE_SECTIONS_DIR: &str = "SECTIONS";
 pub const CACHE_BOOK_FILE: &str = "BOOK.BIN";
 pub const CACHE_COVER_FILE: &str = "COVER.BIN";
@@ -15,6 +17,9 @@ pub const BOOK_HEADER_BYTES: usize = 16;
 pub const SPINE_RECORD_BYTES: usize = 12;
 pub const TOC_RECORD_BYTES: usize = 24;
 pub const SECTION_HEADER_BYTES: usize = 40;
+pub const SECTION_V2_HEADER_BYTES: usize = 48;
+pub const BOOK_V2_HEADER_BYTES: usize = 48;
+pub const BOOK_V2_SECTION_RECORD_BYTES: usize = 16;
 pub const PAGE_HEADER_BYTES: usize = 28;
 pub const PAGE_RECORD_BYTES: usize = 4;
 pub const LINE_RECORD_BYTES: usize = 12;
@@ -76,6 +81,45 @@ pub struct SectionHeader {
     pub font_config: u16,
     pub bytes_consumed: u32,
     pub total_bytes: u32,
+    pub partial: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SectionV2Header {
+    pub source_hash: u32,
+    pub source_size: u32,
+    pub spine: u16,
+    pub page_count: u16,
+    pub block_count: u16,
+    pub text_bytes: u32,
+    pub viewport_width: u16,
+    pub viewport_height: u16,
+    pub font_config: u16,
+    pub bytes_consumed: u32,
+    pub total_bytes: u32,
+    pub partial: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct BookV2Header {
+    pub source_hash: u32,
+    pub source_size: u32,
+    pub total_pages: u32,
+    pub section_count: u16,
+    pub spine_count: u16,
+    pub toc_count: u16,
+    pub viewport_width: u16,
+    pub viewport_height: u16,
+    pub font_config: u16,
+    pub partial: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct BookV2SectionRecord {
+    pub section: u16,
+    pub spine: u16,
+    pub start_page: u32,
+    pub page_count: u16,
     pub partial: bool,
 }
 
@@ -161,9 +205,22 @@ pub fn section_cache_size(header: SectionHeader) -> usize {
     SECTION_HEADER_BYTES
         + header.page_count as usize * PAGE_RECORD_BYTES
         + header.block_count as usize * BLOCK_RECORD_BYTES
+        + header.block_count as usize
         + header.line_count as usize * LINE_RECORD_BYTES
         + header.word_count as usize * WORD_RECORD_BYTES
         + header.text_bytes as usize
+}
+
+pub fn section_v2_cache_size(header: SectionV2Header) -> usize {
+    SECTION_V2_HEADER_BYTES
+        + header.page_count as usize * PAGE_RECORD_BYTES
+        + header.block_count as usize * BLOCK_RECORD_BYTES
+        + header.block_count as usize
+        + header.text_bytes as usize
+}
+
+pub fn book_v2_cache_size(header: BookV2Header) -> usize {
+    BOOK_V2_HEADER_BYTES + header.section_count as usize * BOOK_V2_SECTION_RECORD_BYTES
 }
 
 pub fn cache_key_for(source_path: &str, source_len: u32) -> String<CACHE_KEY_BYTES> {
@@ -318,6 +375,127 @@ pub fn decode_section_header(input: &[u8]) -> Result<SectionHeader, CacheError> 
         font_config: read_u16(input, 24)?,
         bytes_consumed: read_u32(input, 28)?,
         total_bytes: read_u32(input, 32)?,
+    })
+}
+
+pub fn encode_section_v2_header(
+    header: SectionV2Header,
+    out: &mut [u8],
+) -> Result<usize, CacheError> {
+    require(out, SECTION_V2_HEADER_BYTES)?;
+    write_u32(out, 0, CACHE_MAGIC);
+    write_u16(out, 4, CACHE_V2_VERSION);
+    write_u16(out, 6, header.spine);
+    write_u16(out, 8, header.page_count);
+    write_u16(out, 10, header.block_count);
+    out[12] = header.partial as u8;
+    out[13] = 0;
+    write_u16(out, 14, 0);
+    write_u32(out, 16, header.text_bytes);
+    write_u16(out, 20, header.viewport_width);
+    write_u16(out, 22, header.viewport_height);
+    write_u16(out, 24, header.font_config);
+    write_u16(out, 26, 0);
+    write_u32(out, 28, header.bytes_consumed);
+    write_u32(out, 32, header.total_bytes);
+    write_u32(out, 36, header.source_hash);
+    write_u32(out, 40, header.source_size);
+    write_u32(out, 44, 0);
+    Ok(SECTION_V2_HEADER_BYTES)
+}
+
+pub fn decode_section_v2_header(input: &[u8]) -> Result<SectionV2Header, CacheError> {
+    require(input, SECTION_V2_HEADER_BYTES)?;
+    if read_u32(input, 0)? != CACHE_MAGIC {
+        return Err(CacheError::BadMagic);
+    }
+    if read_u16(input, 4)? != CACHE_V2_VERSION {
+        return Err(CacheError::BadVersion);
+    }
+    Ok(SectionV2Header {
+        spine: read_u16(input, 6)?,
+        page_count: read_u16(input, 8)?,
+        block_count: read_u16(input, 10)?,
+        partial: input[12] != 0,
+        text_bytes: read_u32(input, 16)?,
+        viewport_width: read_u16(input, 20)?,
+        viewport_height: read_u16(input, 22)?,
+        font_config: read_u16(input, 24)?,
+        bytes_consumed: read_u32(input, 28)?,
+        total_bytes: read_u32(input, 32)?,
+        source_hash: read_u32(input, 36)?,
+        source_size: read_u32(input, 40)?,
+    })
+}
+
+pub fn encode_book_v2_header(header: BookV2Header, out: &mut [u8]) -> Result<usize, CacheError> {
+    require(out, BOOK_V2_HEADER_BYTES)?;
+    write_u32(out, 0, CACHE_MAGIC);
+    write_u16(out, 4, CACHE_V2_VERSION);
+    out[6] = header.partial as u8;
+    out[7] = 0;
+    write_u32(out, 8, header.source_hash);
+    write_u32(out, 12, header.source_size);
+    write_u32(out, 16, header.total_pages);
+    write_u16(out, 20, header.section_count);
+    write_u16(out, 22, header.spine_count);
+    write_u16(out, 24, header.toc_count);
+    write_u16(out, 26, 0);
+    write_u16(out, 28, header.viewport_width);
+    write_u16(out, 30, header.viewport_height);
+    write_u16(out, 32, header.font_config);
+    write_u16(out, 34, 0);
+    write_u32(out, 36, 0);
+    write_u32(out, 40, 0);
+    write_u32(out, 44, 0);
+    Ok(BOOK_V2_HEADER_BYTES)
+}
+
+pub fn decode_book_v2_header(input: &[u8]) -> Result<BookV2Header, CacheError> {
+    require(input, BOOK_V2_HEADER_BYTES)?;
+    if read_u32(input, 0)? != CACHE_MAGIC {
+        return Err(CacheError::BadMagic);
+    }
+    if read_u16(input, 4)? != CACHE_V2_VERSION {
+        return Err(CacheError::BadVersion);
+    }
+    Ok(BookV2Header {
+        partial: input[6] != 0,
+        source_hash: read_u32(input, 8)?,
+        source_size: read_u32(input, 12)?,
+        total_pages: read_u32(input, 16)?,
+        section_count: read_u16(input, 20)?,
+        spine_count: read_u16(input, 22)?,
+        toc_count: read_u16(input, 24)?,
+        viewport_width: read_u16(input, 28)?,
+        viewport_height: read_u16(input, 30)?,
+        font_config: read_u16(input, 32)?,
+    })
+}
+
+pub fn encode_book_v2_section(
+    record: BookV2SectionRecord,
+    out: &mut [u8],
+) -> Result<usize, CacheError> {
+    require(out, BOOK_V2_SECTION_RECORD_BYTES)?;
+    write_u16(out, 0, record.section);
+    write_u16(out, 2, record.spine);
+    write_u32(out, 4, record.start_page);
+    write_u16(out, 8, record.page_count);
+    out[10] = record.partial as u8;
+    out[11] = 0;
+    write_u32(out, 12, 0);
+    Ok(BOOK_V2_SECTION_RECORD_BYTES)
+}
+
+pub fn decode_book_v2_section(input: &[u8]) -> Result<BookV2SectionRecord, CacheError> {
+    require(input, BOOK_V2_SECTION_RECORD_BYTES)?;
+    Ok(BookV2SectionRecord {
+        section: read_u16(input, 0)?,
+        spine: read_u16(input, 2)?,
+        start_page: read_u32(input, 4)?,
+        page_count: read_u16(input, 8)?,
+        partial: input[10] != 0,
     })
 }
 
@@ -759,6 +937,7 @@ mod tests {
             SECTION_HEADER_BYTES
                 + PAGE_RECORD_BYTES
                 + BLOCK_RECORD_BYTES
+                + 1
                 + LINE_RECORD_BYTES
                 + WORD_RECORD_BYTES * 2
                 + 13
@@ -766,9 +945,85 @@ mod tests {
     }
 
     #[test]
+    fn section_v2_cache_records_round_trip() {
+        let header = SectionV2Header {
+            source_hash: 0x1234_5678,
+            source_size: 98_765,
+            spine: 7,
+            page_count: 2,
+            block_count: 3,
+            text_bytes: 19,
+            viewport_width: 800,
+            viewport_height: 480,
+            font_config: 2,
+            bytes_consumed: 8192,
+            total_bytes: 12_000,
+            partial: true,
+        };
+        let mut bytes = [0u8; SECTION_V2_HEADER_BYTES];
+        encode_section_v2_header(header, &mut bytes).expect("section v2 header encodes");
+
+        assert_eq!(decode_section_v2_header(&bytes).unwrap(), header);
+        assert_eq!(
+            section_v2_cache_size(header),
+            SECTION_V2_HEADER_BYTES + PAGE_RECORD_BYTES * 2 + BLOCK_RECORD_BYTES * 3 + 3 + 19
+        );
+
+        bytes[4] = CACHE_VERSION as u8;
+        bytes[5] = 0;
+        assert_eq!(
+            decode_section_v2_header(&bytes),
+            Err(CacheError::BadVersion)
+        );
+    }
+
+    #[test]
+    fn book_v2_cache_records_round_trip() {
+        let header = BookV2Header {
+            source_hash: 0x1234_5678,
+            source_size: 98_765,
+            total_pages: 123,
+            section_count: 2,
+            spine_count: 9,
+            toc_count: 4,
+            viewport_width: 800,
+            viewport_height: 480,
+            font_config: 1,
+            partial: true,
+        };
+        let section = BookV2SectionRecord {
+            section: 1,
+            spine: 7,
+            start_page: 42,
+            page_count: 12,
+            partial: false,
+        };
+        let mut header_bytes = [0u8; BOOK_V2_HEADER_BYTES];
+        let mut section_bytes = [0u8; BOOK_V2_SECTION_RECORD_BYTES];
+
+        encode_book_v2_header(header, &mut header_bytes).expect("book v2 header encodes");
+        encode_book_v2_section(section, &mut section_bytes).expect("book v2 section encodes");
+
+        assert_eq!(decode_book_v2_header(&header_bytes).unwrap(), header);
+        assert_eq!(decode_book_v2_section(&section_bytes).unwrap(), section);
+        assert_eq!(
+            book_v2_cache_size(header),
+            BOOK_V2_HEADER_BYTES + BOOK_V2_SECTION_RECORD_BYTES * 2
+        );
+
+        header_bytes[4] = CACHE_VERSION as u8;
+        header_bytes[5] = 0;
+        assert_eq!(
+            decode_book_v2_header(&header_bytes),
+            Err(CacheError::BadVersion)
+        );
+    }
+
+    #[test]
     fn artifact_names_and_cache_key_are_stable() {
         assert_eq!(CACHE_ROOT_DIR, "XTEINK");
         assert_eq!(CACHE_DIR, "CACHE");
+        assert_eq!(CACHE_V2_DIR, "CACHE2");
         assert_eq!(CACHE_SECTIONS_DIR, "SECTIONS");
         assert_eq!(CACHE_BOOK_FILE, "BOOK.BIN");
         assert_eq!(CACHE_COVER_FILE, "COVER.BIN");

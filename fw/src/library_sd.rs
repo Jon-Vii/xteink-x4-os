@@ -1,4 +1,5 @@
 use crate::display_flush::Epd;
+use crate::reader_cache_files::{self, MigrationResult};
 use crate::reader_store::{LibraryScanStatus, ReaderStore};
 use crate::sd_session;
 use embedded_sdmmc::{Directory, File, LfnBuffer, Mode, TimeSource};
@@ -32,6 +33,7 @@ pub(crate) fn scan_books(epd: &mut Epd, sd_cs: &mut Output<'static>, library: &m
             LibraryScanStatus::Empty
         } else {
             let _ = write_catalog_cache(&root, library);
+            migrate_reader_cache(&root, library);
             LibraryScanStatus::Ready
         }
     })
@@ -47,6 +49,39 @@ pub(crate) fn scan_books(epd: &mut Epd, sd_cs: &mut Output<'static>, library: &m
     esp_println::println!("sd: scan complete, {} epub(s)", library.catalog_count());
 }
 
+fn migrate_reader_cache<
+    D,
+    T,
+    const MAX_DIRS: usize,
+    const MAX_FILES: usize,
+    const MAX_VOLUMES: usize,
+>(
+    root: &Directory<'_, D, T, MAX_DIRS, MAX_FILES, MAX_VOLUMES>,
+    library: &ReaderStore,
+) where
+    D: embedded_sdmmc::BlockDevice,
+    T: TimeSource,
+{
+    for entry in library.catalog_entries() {
+        let key = proto::cache::cache_key_for(entry.display_name.as_str(), entry.byte_size);
+        match reader_cache_files::migrate_v1_cache_for_entry(
+            root,
+            key.as_str(),
+            (entry.source_hash, entry.byte_size),
+        ) {
+            MigrationResult::Migrated => {
+                esp_println::println!("cache: migrated key={}", key.as_str())
+            }
+            MigrationResult::Invalid => {
+                esp_println::println!("cache: invalid key={}", key.as_str())
+            }
+            MigrationResult::Skipped => {
+                esp_println::println!("cache: skipped key={}", key.as_str())
+            }
+        }
+    }
+}
+
 pub(crate) fn load_catalog_cache(
     epd: &mut Epd,
     sd_cs: &mut Output<'static>,
@@ -55,7 +90,12 @@ pub(crate) fn load_catalog_cache(
     esp_println::println!("sd: catalog cache load start");
 
     let loaded = sd_session::with_root(epd, sd_cs, |root| {
-        read_catalog_cache(&root, library).is_ok()
+        if read_catalog_cache(&root, library).is_ok() {
+            migrate_reader_cache(&root, library);
+            true
+        } else {
+            false
+        }
     })
     .unwrap_or(false);
     if loaded {

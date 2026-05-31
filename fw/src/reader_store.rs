@@ -1,15 +1,16 @@
-use crate::{LibraryEvent, LIBRARY_EVENTS};
+use crate::LibraryEvent;
 use app_core::ReaderSource;
 use display::font::FontStyle;
 use heapless::String;
 use proto::cache::{
-    BlockRecord, PageRecord, TocRecord, CACHE_KEY_BYTES, COVER_BYTES, COVER_HEIGHT, COVER_STRIDE,
-    COVER_WIDTH,
+    BlockRecord, BookV2SectionRecord, PageRecord, TocRecord, CACHE_KEY_BYTES, COVER_BYTES,
+    COVER_HEIGHT, COVER_STRIDE, COVER_WIDTH,
 };
 use proto::text::{TextAlign, TextRole};
 
 pub(crate) const MAX_LIBRARY_BOOKS: usize = 8;
 pub(crate) const MAX_SD_TOC_ITEMS: usize = 64;
+pub(crate) const MAX_BOOK_SECTIONS: usize = 96;
 pub(crate) const MAX_SD_TOC_TEXT_BYTES: usize = 4096;
 pub(crate) const MAX_READER_BLOCKS: usize = 384;
 pub(crate) const MAX_READER_PAGES: usize = 96;
@@ -36,6 +37,13 @@ pub(crate) const EMPTY_TOC_RECORD: TocRecord = TocRecord {
     anchor_len: 0,
     level: 0,
     spine_index: -1,
+};
+pub(crate) const EMPTY_BOOK_SECTION_RECORD: BookV2SectionRecord = BookV2SectionRecord {
+    section: 0,
+    spine: 0,
+    start_page: 0,
+    page_count: 0,
+    partial: false,
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -64,7 +72,7 @@ pub(crate) struct LibraryBookEntry {
 }
 
 impl LibraryBookEntry {
-    pub(crate) fn new() -> Self {
+    pub(crate) const fn new() -> Self {
         Self {
             display_name: String::new(),
             open_name: String::new(),
@@ -105,6 +113,13 @@ pub(crate) struct ReaderStore {
     pub(crate) cover_bits: [u8; COVER_BYTES],
     pub(crate) cached_spine: u16,
     pub(crate) section_partial: bool,
+    pub(crate) book_total_pages: u32,
+    pub(crate) current_section_start_page: u32,
+    pub(crate) current_section_page_count: u16,
+    pub(crate) book_cache_ready: bool,
+    pub(crate) book_cache_partial: bool,
+    pub(crate) book_section_count: usize,
+    pub(crate) book_sections: [BookV2SectionRecord; MAX_BOOK_SECTIONS],
     pub(crate) toc_text: [u8; MAX_SD_TOC_TEXT_BYTES],
     pub(crate) toc_text_len: usize,
     pub(crate) toc: [TocRecord; MAX_SD_TOC_ITEMS],
@@ -124,10 +139,10 @@ pub(crate) struct ReaderStore {
 }
 
 impl ReaderStore {
-    pub(crate) fn new() -> Self {
+    pub(crate) const fn new() -> Self {
         Self {
             status: LibraryScanStatus::NotScanned,
-            entries: core::array::from_fn(|_| LibraryBookEntry::new()),
+            entries: [const { LibraryBookEntry::new() }; MAX_LIBRARY_BOOKS],
             count: 0,
             current_index: None,
             loaded_index: None,
@@ -143,6 +158,13 @@ impl ReaderStore {
             cover_bits: [0; COVER_BYTES],
             cached_spine: 0,
             section_partial: false,
+            book_total_pages: 0,
+            current_section_start_page: 0,
+            current_section_page_count: 0,
+            book_cache_ready: false,
+            book_cache_partial: false,
+            book_section_count: 0,
+            book_sections: [EMPTY_BOOK_SECTION_RECORD; MAX_BOOK_SECTIONS],
             toc_text: [0; MAX_SD_TOC_TEXT_BYTES],
             toc_text_len: 0,
             toc: [EMPTY_TOC_RECORD; MAX_SD_TOC_ITEMS],
@@ -249,6 +271,18 @@ impl ReaderStore {
         }
     }
 
+    pub(crate) fn clear_book_index(&mut self) {
+        self.book_total_pages = 0;
+        self.current_section_start_page = 0;
+        self.current_section_page_count = 0;
+        self.book_cache_ready = false;
+        self.book_cache_partial = false;
+        self.book_section_count = 0;
+        for record in self.book_sections.iter_mut() {
+            *record = EMPTY_BOOK_SECTION_RECORD;
+        }
+    }
+
     pub(crate) fn begin_book_load(&mut self) {
         self.loaded_index = None;
         self.reader_status = BookLoadStatus::Loading;
@@ -257,6 +291,7 @@ impl ReaderStore {
         self.error.clear();
         self.clear_toc();
         self.clear_lines();
+        self.clear_book_index();
     }
 
     pub(crate) fn finish_book_load(&mut self, index: usize, chapter: u8, status: BookLoadStatus) {
@@ -368,16 +403,7 @@ impl ReaderStore {
         self.text_len = text_len;
         self.cached_spine = spine;
         self.section_partial = partial;
-    }
-
-    pub(crate) fn cover_bits_mut(&mut self) -> &mut [u8; COVER_BYTES] {
-        &mut self.cover_bits
-    }
-
-    pub(crate) fn set_cover_cache(&mut self, width: u16, height: u16) {
-        self.cover_width = width;
-        self.cover_height = height;
-        self.cover_ready = true;
+        self.current_section_page_count = page_count.min(u16::MAX as usize) as u16;
     }
 
     pub(crate) fn set_section_partial(&mut self, partial: bool) {
@@ -388,10 +414,53 @@ impl ReaderStore {
         self.cached_spine = spine;
     }
 
-    pub(crate) fn force_next_block_to_new_page(&mut self) {
-        if self.block_count < self.block_page_break_before.len() && self.block_count > 0 {
-            self.block_page_break_before[self.block_count] = true;
+    pub(crate) fn set_book_index(
+        &mut self,
+        total_pages: u32,
+        partial: bool,
+        sections: &[BookV2SectionRecord],
+    ) {
+        self.book_total_pages = total_pages.max(1);
+        self.book_cache_ready = true;
+        self.book_cache_partial = partial;
+        self.book_section_count = sections.len().min(self.book_sections.len());
+        for (index, record) in sections.iter().take(self.book_section_count).enumerate() {
+            self.book_sections[index] = *record;
         }
+        for index in self.book_section_count..self.book_sections.len() {
+            self.book_sections[index] = EMPTY_BOOK_SECTION_RECORD;
+        }
+    }
+
+    pub(crate) fn set_current_section_range(&mut self, start_page: u32, page_count: usize) {
+        self.current_section_start_page = start_page;
+        self.current_section_page_count = page_count.min(u16::MAX as usize) as u16;
+    }
+
+    pub(crate) fn local_page_for_global(&self, global_page: u32) -> usize {
+        global_page
+            .saturating_sub(self.current_section_start_page)
+            .min(self.current_section_page_count.saturating_sub(1) as u32) as usize
+    }
+
+    pub(crate) fn section_for_global_page(&self, global_page: u32) -> Option<BookV2SectionRecord> {
+        self.book_sections
+            .iter()
+            .take(self.book_section_count)
+            .copied()
+            .find(|section| {
+                let start = section.start_page;
+                let end = start.saturating_add(section.page_count.max(1) as u32);
+                global_page >= start && global_page < end
+            })
+            .or_else(|| {
+                self.book_sections
+                    .iter()
+                    .take(self.book_section_count)
+                    .copied()
+                    .last()
+                    .filter(|section| global_page >= section.start_page)
+            })
     }
 
     pub(crate) fn block_text(&self, index: usize) -> &str {
@@ -418,12 +487,7 @@ impl ReaderStore {
     }
 
     pub(crate) fn advertised_page_count(&self) -> u32 {
-        let cached = self.page_count.max(1) as u32;
-        if self.section_partial {
-            cached.saturating_add(1)
-        } else {
-            cached
-        }
+        self.book_total_pages.max(self.page_count.max(1) as u32)
     }
 
     pub(crate) fn toc_title(&self, index: usize) -> &str {
@@ -432,15 +496,6 @@ impl ReaderStore {
         };
         let start = record.title_offset as usize;
         let end = start.saturating_add(record.title_len as usize);
-        core::str::from_utf8(self.toc_text.get(start..end).unwrap_or(&[])).unwrap_or("")
-    }
-
-    pub(crate) fn toc_href(&self, index: usize) -> &str {
-        let Some(record) = self.toc.get(index) else {
-            return "";
-        };
-        let start = record.href_offset as usize;
-        let end = start.saturating_add(record.href_len as usize);
         core::str::from_utf8(self.toc_text.get(start..end).unwrap_or(&[])).unwrap_or("")
     }
 
@@ -456,6 +511,59 @@ impl ReaderStore {
             title: self.toc_title(index),
             level: self.toc[index].level.max(1),
         })
+    }
+
+    pub(crate) fn push_toc_record(
+        &mut self,
+        title: &str,
+        href: &str,
+        level: u8,
+        spine_index: i16,
+    ) -> bool {
+        if self.toc_count >= self.toc.len() {
+            return false;
+        }
+        let (href_without_anchor, anchor) = href.split_once('#').unwrap_or((href, ""));
+        let title_offset = self.toc_text_len;
+        if !self.append_toc_text(title) {
+            return false;
+        }
+        let href_offset = self.toc_text_len;
+        if !self.append_toc_text(href_without_anchor) {
+            self.toc_text_len = title_offset;
+            return false;
+        }
+        let anchor_offset = self.toc_text_len;
+        if !self.append_toc_text(anchor) {
+            self.toc_text_len = title_offset;
+            return false;
+        }
+        self.toc[self.toc_count] = TocRecord {
+            title_offset: title_offset as u32,
+            title_len: title.len().min(u16::MAX as usize) as u16,
+            href_offset: href_offset as u32,
+            href_len: href_without_anchor.len().min(u16::MAX as usize) as u16,
+            anchor_offset: anchor_offset as u32,
+            anchor_len: anchor.len().min(u16::MAX as usize) as u16,
+            level,
+            spine_index,
+        };
+        self.toc_page[self.toc_count] = 0;
+        self.toc_count += 1;
+        true
+    }
+
+    fn append_toc_text(&mut self, value: &str) -> bool {
+        let bytes = value.as_bytes();
+        if self.toc_text_len + bytes.len() > self.toc_text.len()
+            || self.toc_text_len > u16::MAX as usize
+            || bytes.len() > u16::MAX as usize
+        {
+            return false;
+        }
+        self.toc_text[self.toc_text_len..self.toc_text_len + bytes.len()].copy_from_slice(bytes);
+        self.toc_text_len += bytes.len();
+        true
     }
 
     pub(crate) fn active_book_labels<'a>(
@@ -507,58 +615,24 @@ impl ReaderStore {
         self.reader_status
     }
 
+    pub(crate) fn reader_status_for(&self, book_id: u32) -> BookLoadStatus {
+        let selected_index = Self::selected_book_index(book_id);
+        match self.reader_status {
+            BookLoadStatus::Ready | BookLoadStatus::Error
+                if self.loaded_index != selected_index =>
+            {
+                BookLoadStatus::Loading
+            }
+            status => status,
+        }
+    }
+
     pub(crate) fn reader_error(&self) -> &str {
         self.error.as_str()
     }
 
-    pub(crate) fn push_toc_record(
-        &mut self,
-        title: &str,
-        href: &str,
-        level: u8,
-        spine_index: i16,
-    ) -> bool {
-        if self.toc_count >= self.toc.len() {
-            return false;
-        }
-        let title = title.trim();
-        let href = strip_fragment(href).trim();
-        if title.is_empty() || href.is_empty() {
-            return true;
-        }
-        let title_start = self.toc_text_len;
-        let title_bytes = title.as_bytes();
-        let href_start = title_start.saturating_add(title_bytes.len());
-        let href_bytes = href.as_bytes();
-        let end = href_start.saturating_add(href_bytes.len());
-        if end > self.toc_text.len()
-            || title_bytes.len() > u16::MAX as usize
-            || href_bytes.len() > u16::MAX as usize
-        {
-            return false;
-        }
-        self.toc_text[title_start..href_start].copy_from_slice(title_bytes);
-        self.toc_text[href_start..end].copy_from_slice(href_bytes);
-        self.toc_text_len = end;
-        self.toc[self.toc_count] = TocRecord {
-            title_offset: title_start as u32,
-            title_len: title_bytes.len() as u16,
-            href_offset: href_start as u32,
-            href_len: href_bytes.len() as u16,
-            anchor_offset: 0,
-            anchor_len: 0,
-            level: level.max(1),
-            spine_index,
-        };
-        self.toc_count += 1;
-        true
-    }
-
     pub(crate) fn chapter_count_for_ui(&self) -> u8 {
-        self.toc_count
-            .max(self.page_count)
-            .min(u8::MAX as usize)
-            .max(1) as u8
+        self.toc_count.min(u8::MAX as usize).max(1) as u8
     }
 
     pub(crate) fn push(
@@ -645,7 +719,7 @@ fn proto_style_for_display_style(style: FontStyle) -> proto::text::FontStyle {
 pub(crate) fn publish_chapter_pages(book_id: u32, store: &ReaderStore) {
     if store.toc_count > 0 {
         for index in 0..store.toc_count.min(MAX_SD_TOC_ITEMS).min(u8::MAX as usize) {
-            let _ = LIBRARY_EVENTS.try_send(LibraryEvent::ChapterPage {
+            crate::tasks::display::send_library_event(LibraryEvent::ChapterPage {
                 book_id,
                 chapter: index as u8,
                 page: store.toc_page[index] as u32,
@@ -653,17 +727,13 @@ pub(crate) fn publish_chapter_pages(book_id: u32, store: &ReaderStore) {
         }
     } else {
         for index in 0..store.page_count.min(MAX_SD_TOC_ITEMS).min(u8::MAX as usize) {
-            let _ = LIBRARY_EVENTS.try_send(LibraryEvent::ChapterPage {
+            crate::tasks::display::send_library_event(LibraryEvent::ChapterPage {
                 book_id,
                 chapter: index as u8,
                 page: index as u32,
             });
         }
     }
-}
-
-fn strip_fragment(value: &str) -> &str {
-    value.split('#').next().unwrap_or(value)
 }
 
 pub(crate) fn source_hash(path: &str, byte_size: u32) -> u32 {

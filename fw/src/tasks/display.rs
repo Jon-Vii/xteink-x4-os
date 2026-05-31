@@ -1,8 +1,7 @@
 use crate::display_flush::{self, Epd};
 use crate::reader_cache::{
     self, ReaderCacheScratch, READER_COMPRESSED_SCRATCH, READER_CONTAINER_SCRATCH,
-    READER_CSS_SCRATCH, READER_HEADER_SCRATCH, READER_OPF_SCRATCH, READER_TAIL_SCRATCH,
-    READER_XHTML_SCRATCH,
+    READER_HEADER_SCRATCH, READER_OPF_SCRATCH, READER_TAIL_SCRATCH, READER_XHTML_SCRATCH,
 };
 use crate::reader_store::{BookLoadStatus, ReaderStore};
 use crate::{
@@ -40,8 +39,6 @@ pub async fn run(mut epd: Epd, mut sd_cs: Output<'static>) {
         ConstStaticCell::new([0; READER_CONTAINER_SCRATCH]);
     static EPUB_OPF: ConstStaticCell<[u8; READER_OPF_SCRATCH]> =
         ConstStaticCell::new([0; READER_OPF_SCRATCH]);
-    static EPUB_CSS: ConstStaticCell<[u8; READER_CSS_SCRATCH]> =
-        ConstStaticCell::new([0; READER_CSS_SCRATCH]);
     static EPUB_XHTML: ConstStaticCell<[u8; READER_XHTML_SCRATCH]> =
         ConstStaticCell::new([0; READER_XHTML_SCRATCH]);
     static EPUB_SCRATCH: static_cell::StaticCell<ReaderCacheScratch<'static>> =
@@ -53,8 +50,8 @@ pub async fn run(mut epd: Epd, mut sd_cs: Output<'static>) {
     esp_println::println!("display: init complete");
 
     let mut refresh_planner = RefreshPlanner::new();
-    static SD_LIBRARY: static_cell::StaticCell<ReaderStore> = static_cell::StaticCell::new();
-    let sd_library = SD_LIBRARY.init_with(ReaderStore::new);
+    static SD_LIBRARY: ConstStaticCell<ReaderStore> = ConstStaticCell::new(ReaderStore::new());
+    let sd_library = SD_LIBRARY.take();
     loop {
         match select(DISPLAY_COMMANDS.receive(), STORAGE_COMMANDS.receive()).await {
             Either::First(DisplayCommand::Render(request)) => {
@@ -92,7 +89,7 @@ pub async fn run(mut epd: Epd, mut sd_cs: Output<'static>) {
                     refresh_planner.record_render(request, mode);
                     prev_fb.copy_from(fb);
                     let _ = DISPLAY_EVENTS.try_send(DisplayEvent::Settled);
-                    let _ = POWER_EVENTS.send(PowerEvent::DisplaySettled).await;
+                    let _ = POWER_EVENTS.try_send(PowerEvent::DisplaySettled);
                 } else {
                     esp_println::println!("display: SPI transfer failed");
                 }
@@ -114,11 +111,11 @@ pub async fn run(mut epd: Epd, mut sd_cs: Output<'static>) {
                 if display_flush::sleep_panel(&mut epd).await.is_ok() {
                     refresh_planner.record_sleep();
                     let _ = DISPLAY_EVENTS.try_send(DisplayEvent::Asleep);
-                    let _ = POWER_EVENTS.send(PowerEvent::DisplayAsleep).await;
+                    let _ = POWER_EVENTS.try_send(PowerEvent::DisplayAsleep);
                 } else {
                     esp_println::println!("display: sleep command failed");
                     let _ = DISPLAY_EVENTS.try_send(DisplayEvent::Asleep);
-                    let _ = POWER_EVENTS.send(PowerEvent::DisplayAsleep).await;
+                    let _ = POWER_EVENTS.try_send(PowerEvent::DisplayAsleep);
                 }
             }
             Either::Second(command) => {
@@ -137,7 +134,6 @@ pub async fn run(mut epd: Epd, mut sd_cs: Output<'static>) {
                                 EPUB_COMPRESSED.take(),
                                 EPUB_CONTAINER.take(),
                                 EPUB_OPF.take(),
-                                EPUB_CSS.take(),
                                 EPUB_XHTML.take(),
                             )
                         })
@@ -145,6 +141,12 @@ pub async fn run(mut epd: Epd, mut sd_cs: Output<'static>) {
                 );
             }
         }
+    }
+}
+
+pub(crate) fn send_library_event(event: LibraryEvent) {
+    if LIBRARY_EVENTS.try_send(event).is_err() {
+        esp_println::println!("display: library event queue full");
     }
 }
 

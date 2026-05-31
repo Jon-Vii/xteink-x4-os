@@ -1,0 +1,201 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1600" height="1080" viewBox="0 0 1600 1080" role="img" aria-labelledby="title desc">
+  <title id="title">xteink-x4-os current architecture</title>
+  <desc id="desc">Architecture diagram for the Xteink X4 firmware showing hardware inputs, Embassy tasks, shared crates, display and storage paths, and host tooling.</desc>
+  <defs>
+    <marker id="arrow" markerWidth="12" markerHeight="12" refX="10" refY="6" orient="auto" markerUnits="strokeWidth">
+      <path d="M2,2 L10,6 L2,10 Z" fill="#2f3a45"/>
+    </marker>
+    <marker id="soft-arrow" markerWidth="12" markerHeight="12" refX="10" refY="6" orient="auto" markerUnits="strokeWidth">
+      <path d="M2,2 L10,6 L2,10 Z" fill="#6a7480"/>
+    </marker>
+    <style>
+      .bg { fill: #f7f4ee; }
+      .panel { fill: #fffdfa; stroke: #c9c1b6; stroke-width: 2; }
+      .hardware { fill: #e7f0f8; stroke: #7b9ab8; }
+      .task { fill: #eef6ea; stroke: #7aa36f; }
+      .crate { fill: #fff2d8; stroke: #c99b47; }
+      .device { fill: #f4e7ee; stroke: #b77c99; }
+      .tool { fill: #ece8fa; stroke: #8d7bc2; }
+      .title { font: 700 34px Arial, sans-serif; fill: #202833; }
+      .subtitle { font: 18px Arial, sans-serif; fill: #56616d; }
+      .section { font: 700 18px Arial, sans-serif; fill: #3d4650; letter-spacing: .5px; }
+      .label { font: 700 18px Arial, sans-serif; fill: #1f2933; }
+      .small { font: 15px Arial, sans-serif; fill: #46515c; }
+      .tiny { font: 13px Arial, sans-serif; fill: #5b6672; }
+      .edge { fill: none; stroke: #2f3a45; stroke-width: 3; marker-end: url(#arrow); }
+      .soft-edge { fill: none; stroke: #6a7480; stroke-width: 2.5; stroke-dasharray: 8 7; marker-end: url(#soft-arrow); }
+      .channel { font: 13px Arial, sans-serif; fill: #36424d; }
+    </style>
+  </defs>
+
+  <rect class="bg" x="0" y="0" width="1600" height="1080"/>
+  <text class="title" x="60" y="60">xteink-x4-os current architecture</text>
+  <text class="subtitle" x="60" y="91">Bare-metal Rust reader firmware: buttons -> app state -> display command -> framebuffer -> SSD1677 RAM -> refresh -> sleep</text>
+
+  <rect class="panel" x="40" y="130" width="330" height="720" rx="12"/>
+  <text class="section" x="70" y="165">HARDWARE INPUTS</text>
+
+  <rect class="panel" x="420" y="130" width="470" height="720" rx="12"/>
+  <text class="section" x="450" y="165">EMBASSY TASKS IN FW</text>
+
+  <rect class="panel" x="940" y="130" width="280" height="720" rx="12"/>
+  <text class="section" x="970" y="165">SHARED CRATES</text>
+
+  <rect class="panel" x="1270" y="130" width="290" height="720" rx="12"/>
+  <text class="section" x="1300" y="165">BOARD OUTPUTS</text>
+
+  <rect class="panel" x="250" y="895" width="1100" height="135" rx="12"/>
+  <text class="section" x="280" y="930">HOST DEVELOPMENT LOOP</text>
+
+  <g id="buttons">
+    <rect class="hardware" x="80" y="230" width="250" height="92" rx="10"/>
+    <text class="label" x="105" y="264">GPIO3 power button</text>
+    <text class="small" x="105" y="291">active-low wake/sleep input</text>
+  </g>
+  <g id="adc">
+    <rect class="hardware" x="80" y="365" width="250" height="112" rx="10"/>
+    <text class="label" x="105" y="399">ADC button ladders</text>
+    <text class="small" x="105" y="426">GPIO0 battery sample</text>
+    <text class="small" x="105" y="449">GPIO1 front buttons</text>
+  </g>
+  <g id="spi">
+    <rect class="hardware" x="80" y="590" width="250" height="116" rx="10"/>
+    <text class="label" x="105" y="624">Shared SPI bus</text>
+    <text class="small" x="105" y="651">SCK GPIO8, MOSI GPIO10</text>
+    <text class="small" x="105" y="674">MISO GPIO7, SD CS GPIO12</text>
+  </g>
+
+  <g id="input-task">
+    <rect class="task" x="465" y="210" width="360" height="104" rx="10"/>
+    <text class="label" x="495" y="246">input_task</text>
+    <text class="small" x="495" y="273">polls GPIO and ADC every 40 ms</text>
+    <text class="small" x="495" y="296">debounces and emits reader buttons</text>
+  </g>
+  <g id="app-task">
+    <rect class="task" x="465" y="375" width="360" height="126" rx="10"/>
+    <text class="label" x="495" y="411">app_task</text>
+    <text class="small" x="495" y="438">single writer for ReaderState</text>
+    <text class="small" x="495" y="461">coalesces renders while display is busy</text>
+    <text class="small" x="495" y="484">queues explicit storage work</text>
+  </g>
+  <g id="display-task">
+    <rect class="task" x="465" y="565" width="360" height="154" rx="10"/>
+    <text class="label" x="495" y="601">board I/O + display task</text>
+    <text class="small" x="495" y="628">owns EPD bus, SD CS, ReaderStore</text>
+    <text class="small" x="495" y="651">renders snapshots into framebuffer</text>
+    <text class="small" x="495" y="674">serializes EPD refresh and SD sessions</text>
+    <text class="small" x="495" y="697">sends display and library events</text>
+  </g>
+  <g id="power-task">
+    <rect class="task" x="465" y="745" width="170" height="72" rx="10"/>
+    <text class="label" x="490" y="778">power_task</text>
+    <text class="small" x="490" y="802">idle + deep sleep</text>
+  </g>
+  <g id="wifi-task">
+    <rect class="task" x="655" y="745" width="170" height="72" rx="10"/>
+    <text class="label" x="680" y="778">wifi_task</text>
+    <text class="small" x="680" y="802">sync placeholder</text>
+  </g>
+
+  <g id="app-core">
+    <rect class="crate" x="980" y="205" width="200" height="102" rx="10"/>
+    <text class="label" x="1005" y="239">app-core</text>
+    <text class="small" x="1005" y="266">Copy messages</text>
+    <text class="small" x="1005" y="289">ReaderState reducer</text>
+  </g>
+  <g id="display-crate">
+    <rect class="crate" x="980" y="340" width="200" height="112" rx="10"/>
+    <text class="label" x="1005" y="374">display</text>
+    <text class="small" x="1005" y="401">1 bpp framebuffer</text>
+    <text class="small" x="1005" y="424">fonts + drawing</text>
+  </g>
+  <g id="proto-crate">
+    <rect class="crate" x="980" y="485" width="200" height="128" rx="10"/>
+    <text class="label" x="1005" y="519">proto</text>
+    <text class="small" x="1005" y="546">book/storage/text/cache</text>
+    <text class="small" x="1005" y="569">ZIP + EPUB + XHTML</text>
+    <text class="small" x="1005" y="592">bounded records</text>
+  </g>
+  <g id="hal-ui">
+    <rect class="crate" x="980" y="650" width="200" height="104" rx="10"/>
+    <text class="label" x="1005" y="684">hal-ext + ui</text>
+    <text class="small" x="1005" y="711">SPI DMA / RTC / NVM</text>
+    <text class="small" x="1005" y="734">bounded layouts</text>
+  </g>
+
+  <g id="panel">
+    <rect class="device" x="1310" y="230" width="210" height="118" rx="10"/>
+    <text class="label" x="1335" y="264">SSD1677 panel</text>
+    <text class="small" x="1335" y="291">800x480 e-ink</text>
+    <text class="small" x="1335" y="314">BW + RED RAM</text>
+  </g>
+  <g id="sd-card">
+    <rect class="device" x="1310" y="425" width="210" height="154" rx="10"/>
+    <text class="label" x="1335" y="459">microSD FAT</text>
+    <text class="small" x="1335" y="486">/BOOKS and card root</text>
+    <text class="small" x="1335" y="509">/XTEINK/CATALOG.BIN</text>
+    <text class="small" x="1335" y="532">/XTEINK/CACHE/...</text>
+    <text class="small" x="1335" y="555">/XTEINK/STATE.BIN</text>
+  </g>
+  <g id="deep-sleep">
+    <rect class="device" x="1310" y="675" width="210" height="82" rx="10"/>
+    <text class="label" x="1335" y="709">ESP32-C3</text>
+    <text class="small" x="1335" y="736">deep sleep</text>
+  </g>
+
+  <g id="emulator">
+    <rect class="tool" x="300" y="955" width="300" height="54" rx="10"/>
+    <text class="label" x="325" y="990">tools/emulator</text>
+  </g>
+  <g id="preview">
+    <rect class="tool" x="650" y="955" width="260" height="54" rx="10"/>
+    <text class="label" x="675" y="990">tools/preview</text>
+  </g>
+  <g id="goldens">
+    <rect class="tool" x="960" y="955" width="310" height="54" rx="10"/>
+    <text class="label" x="985" y="990">fixtures scenarios + golden PNGs</text>
+  </g>
+
+  <path class="edge" d="M330 276 C380 276 410 262 465 262"/>
+  <text class="channel" x="344" y="252">raw power edge</text>
+  <path class="edge" d="M330 421 C388 421 412 300 465 284"/>
+  <text class="channel" x="337" y="389">raw ADC samples</text>
+
+  <path class="edge" d="M645 314 L645 375"/>
+  <text class="channel" x="660" y="348">InputEvent</text>
+  <path class="edge" d="M825 425 L925 425 L925 612 L825 612"/>
+  <text class="channel" x="836" y="407">DisplayCommand</text>
+  <text class="channel" x="838" y="586">StorageCommand</text>
+  <path class="edge" d="M465 628 L407 628 L407 438 L465 438"/>
+  <text class="channel" x="284" y="528">DisplayEvent + LibraryEvent</text>
+
+  <path class="edge" d="M570 501 L570 745"/>
+  <text class="channel" x="584" y="535">PowerEvent::Activity</text>
+  <path class="edge" d="M635 719 L635 745"/>
+  <text class="channel" x="650" y="733">settled/asleep</text>
+  <path class="edge" d="M465 778 C390 778 390 680 465 680"/>
+  <text class="channel" x="276" y="753">DisplayCommand::Sleep</text>
+  <path class="edge" d="M635 781 L1310 716"/>
+
+  <path class="edge" d="M330 648 C390 648 410 648 465 648"/>
+  <text class="channel" x="348" y="629">shared SPI ownership</text>
+  <path class="edge" d="M825 622 C1030 622 1110 289 1310 289"/>
+  <text class="channel" x="1112" y="322">framebuffer flush</text>
+  <path class="edge" d="M825 666 C1015 666 1115 502 1310 502"/>
+  <text class="channel" x="1110" y="526">SD session</text>
+
+  <path class="soft-edge" d="M825 420 C900 400 910 265 980 256"/>
+  <path class="soft-edge" d="M825 625 C900 590 910 405 980 396"/>
+  <path class="soft-edge" d="M825 650 C910 630 910 552 980 552"/>
+  <path class="soft-edge" d="M825 685 C910 690 910 704 980 704"/>
+
+  <path class="soft-edge" d="M450 955 C560 875 950 850 1050 307"/>
+  <path class="soft-edge" d="M450 955 C605 870 995 830 1050 452"/>
+  <path class="soft-edge" d="M450 955 C620 870 1010 820 1050 613"/>
+  <path class="soft-edge" d="M780 955 C825 860 920 480 980 405"/>
+  <path class="soft-edge" d="M780 955 C850 870 950 650 980 560"/>
+  <path class="edge" d="M600 982 L650 982"/>
+  <path class="edge" d="M910 982 L960 982"/>
+
+  <text class="tiny" x="60" y="1040">Dashed arrows show crate dependencies. Solid arrows show runtime data/control flow.</text>
+</svg>

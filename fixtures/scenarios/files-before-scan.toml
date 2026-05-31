@@ -1,0 +1,15 @@
+[[steps]]
+button = "Confirm"
+
+[[steps]]
+button = "Confirm"
+
+[[steps]]
+library = "Scanned"
+count = 3
+
+[expect]
+view = "Library"
+book_id = 1
+library_count = 3
+selection = 0

@@ -2,7 +2,9 @@ mod panel;
 mod render;
 mod scenario;
 
-use app_core::{Button, InputEvent, LibraryEvent, RefreshPlanner};
+use app_core::{
+    AppView, Button, InputEvent, LibraryEvent, ReaderSource, RefreshPlanner, StorageCommand,
+};
 #[cfg(feature = "gui")]
 use display::{HEIGHT, WIDTH};
 #[cfg(feature = "gui")]
@@ -188,6 +190,15 @@ pub struct Emulator {
     sleeping: bool,
     _sd_root: Option<PathBuf>,
     library_entries: Vec<String>,
+    last_storage: Option<StorageCommand>,
+    sd_reader_status: EmulatedReaderStatus,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum EmulatedReaderStatus {
+    Empty,
+    Loading,
+    Ready,
 }
 
 impl Emulator {
@@ -201,6 +212,8 @@ impl Emulator {
             sleeping: false,
             _sd_root: sd_root,
             library_entries: Vec::new(),
+            last_storage: None,
+            sd_reader_status: EmulatedReaderStatus::Empty,
         };
         emu.panel.init_sequence().expect("panel init");
         emu.render(app_core::RenderKind::Boot);
@@ -223,11 +236,27 @@ impl Emulator {
         if self.sleeping {
             return;
         }
+        let previous = self.state;
         self.state = self.state.apply_input(self.ctx, InputEvent::button(button));
         self.render(app_core::RenderKind::Page);
+        if let Some(command) = storage_command_for_transition(previous, self.state) {
+            if matches!(command, StorageCommand::OpenBook { .. }) {
+                self.sd_reader_status = EmulatedReaderStatus::Loading;
+                self.render(app_core::RenderKind::Page);
+            }
+            self.last_storage = Some(command);
+        }
     }
 
     pub fn library_event(&mut self, event: LibraryEvent) {
+        if let LibraryEvent::Scanned { count } = event {
+            self.library_entries.clear();
+            self.library_entries
+                .extend((0..count).map(|index| format!("SD Book {}", index + 1)));
+        }
+        if matches!(event, LibraryEvent::Loaded { .. }) {
+            self.sd_reader_status = EmulatedReaderStatus::Ready;
+        }
         self.state = self.state.apply_library_event(self.ctx, event);
         self.render(app_core::RenderKind::Page);
     }
@@ -248,9 +277,36 @@ impl Emulator {
         &self.fb
     }
 
+    pub fn pending_storage_name(&self) -> Option<&'static str> {
+        match self.last_storage {
+            Some(StorageCommand::LoadCatalogCache) => Some("LoadCatalogCache"),
+            Some(StorageCommand::RefreshCatalog) => Some("RefreshCatalog"),
+            Some(StorageCommand::OpenBook { .. }) => Some("OpenBook"),
+            Some(StorageCommand::ExtendSection { .. }) => Some("ExtendSection"),
+            Some(StorageCommand::StoreProgress(_)) => Some("StoreProgress"),
+            None => None,
+        }
+    }
+
+    pub fn reader_status_name(&self) -> &'static str {
+        match self.sd_reader_status {
+            EmulatedReaderStatus::Empty => "Empty",
+            EmulatedReaderStatus::Loading => "Loading",
+            EmulatedReaderStatus::Ready => "Ready",
+        }
+    }
+
     fn render(&mut self, kind: app_core::RenderKind) {
         let request = self.state.render_request(kind);
-        crate::render::render_request(&mut self.fb, request, &self.library_entries);
+        if request.view == AppView::Reading
+            && ReaderSource::from_book_id(request.book_id).is_sd()
+            && self.sd_reader_status != EmulatedReaderStatus::Ready
+        {
+            self.fb.clear(true);
+            display::render::draw_ascii(&mut self.fb, "OPENING EPUB", 20, 72, false);
+        } else {
+            crate::render::render_request(&mut self.fb, request, &self.library_entries);
+        }
         let mode = self.refresh_planner.mode_for(request);
         self.panel
             .write_framebuffer_bw(&self.fb)
@@ -273,6 +329,45 @@ impl Emulator {
         self.panel.deep_sleep().expect("panel deep sleep");
         self.refresh_planner.record_sleep();
     }
+}
+
+fn storage_command_for_transition(
+    previous: app_core::ReaderState,
+    next: app_core::ReaderState,
+) -> Option<StorageCommand> {
+    let Some(index) = ReaderSource::from_book_id(next.book_id).sd_index() else {
+        return None;
+    };
+    if next.view != AppView::Reading {
+        return None;
+    }
+
+    if previous.book_id != next.book_id
+        || previous.chapter != next.chapter
+        || previous.view != AppView::Reading
+    {
+        return Some(StorageCommand::OpenBook {
+            book_id: next.book_id,
+            index,
+            chapter: next.chapter,
+            target_pages: 5,
+        });
+    }
+
+    if next.page.saturating_add(2) >= next.sd_page_count {
+        return Some(StorageCommand::ExtendSection {
+            book_id: next.book_id,
+            index,
+            chapter: next.chapter,
+            target_pages: next.page.saturating_add(5).min(u16::MAX as u32) as u16,
+        });
+    }
+
+    if previous.page != next.page {
+        return Some(StorageCommand::StoreProgress(next.persisted()));
+    }
+
+    None
 }
 
 #[cfg(feature = "gui")]

@@ -1,11 +1,8 @@
 use crate::{DisplayCommand, PowerEvent, DISPLAY_COMMANDS, POWER_EVENTS};
 use core::time::Duration;
-use embassy_futures::select::{select, Either};
-use embassy_time::Timer;
 use esp_hal::peripherals::LPWR;
 use esp_hal::rtc_cntl::Rtc;
 
-const IDLE_AFTER_REFRESH_MS: u64 = 300_000;
 const RTC_WAKE_SECS: u64 = 600;
 
 #[embassy_executor::task]
@@ -47,13 +44,5 @@ async fn request_display_sleep() -> bool {
 }
 
 async fn idle_window_expired() -> bool {
-    match select(
-        Timer::after_millis(IDLE_AFTER_REFRESH_MS),
-        POWER_EVENTS.receive(),
-    )
-    .await
-    {
-        Either::First(_) => true,
-        Either::Second(_) => false,
-    }
+    false
 }

@@ -1,6 +1,6 @@
 use crate::reader_store::ReaderStore;
 use display::fb::Framebuffer;
-use display::font::{draw_text_mirrored_y_glyphs, literata, measure_text, BitmapFont, FontStyle};
+use display::font::{draw_text, literata, measure_text, BitmapFont, FontStyle};
 use display::WIDTH;
 use proto::cache::{BlockRecord, PageRecord};
 use proto::text::{TextAlign, TextRole};
@@ -29,7 +29,7 @@ pub(crate) struct ReaderDrawableBlock<'a> {
 impl ReaderPagePlan {
     pub(crate) fn new(sd_library: &ReaderStore, requested_page: u32) -> Self {
         let page_count = reader_page_count(sd_library, READER_PAGE_TOP, READER_PAGE_BOTTOM);
-        let requested_page = requested_page.min(page_count - 1) as usize;
+        let requested_page = sd_library.local_page_for_global(requested_page.min(page_count - 1));
         let page = reader_page_at(
             sd_library,
             requested_page,
@@ -76,6 +76,9 @@ impl ReaderPagePlan {
 }
 
 pub(crate) fn reader_page_count(sd_library: &ReaderStore, page_top: i16, page_bottom: i16) -> u32 {
+    if sd_library.book_total_pages > 0 {
+        return sd_library.book_total_pages;
+    }
     if sd_library.page_count > 0 {
         return sd_library.page_count as u32;
     }
@@ -157,11 +160,20 @@ pub(crate) fn rebuild_toc_page_targets(library: &mut ReaderStore) {
             library.toc_page[toc_index] = 0;
             continue;
         }
+        let spine = spine_index as u16;
         let page = library
-            .page_spine
+            .book_sections
             .iter()
-            .take(library.page_count)
-            .position(|page_spine| *page_spine == spine_index as u16)
+            .take(library.book_section_count)
+            .find(|section| section.spine == spine)
+            .map(|section| section.start_page as usize)
+            .or_else(|| {
+                library
+                    .page_spine
+                    .iter()
+                    .take(library.page_count)
+                    .position(|page_spine| *page_spine == spine)
+            })
             .unwrap_or(0);
         library.toc_page[toc_index] = page.min(u16::MAX as usize) as u16;
     }
@@ -396,7 +408,7 @@ pub(crate) fn draw_styled_line(
             continue;
         }
         if run_start < index {
-            cursor_x = draw_text_mirrored_y_glyphs(
+            cursor_x = draw_text(
                 fb,
                 literata(style),
                 &text[run_start..index],
@@ -413,7 +425,7 @@ pub(crate) fn draw_styled_line(
         }
     }
     if run_start < text.len() {
-        cursor_x = draw_text_mirrored_y_glyphs(
+        cursor_x = draw_text(
             fb,
             literata(style),
             &text[run_start..],
@@ -481,7 +493,7 @@ pub(crate) fn draw_centered_wrapped_literata(
         let line = &text[line_start..line_end];
         let width = text_ink_width(font, line).min(max_width);
         let x = ((WIDTH as i16 - width) / 2).max(20);
-        draw_text_mirrored_y_glyphs(fb, font, line, x, baseline_y, false);
+        draw_text(fb, font, line, x, baseline_y, false);
         baseline_y += line_advance;
         cursor = next_cursor;
         if cursor >= bytes.len() {
@@ -506,7 +518,7 @@ pub(crate) fn draw_wrapped_literata(
     while let Some((line_start, line_end, next_cursor)) =
         next_wrapped_line(text, cursor, font, x, max_x)
     {
-        draw_text_mirrored_y_glyphs(fb, font, &text[line_start..line_end], x, baseline_y, false);
+        draw_text(fb, font, &text[line_start..line_end], x, baseline_y, false);
         baseline_y += line_advance;
         cursor = next_cursor;
         if cursor >= bytes.len() {
@@ -566,7 +578,7 @@ fn draw_justified_line(
         .filter(|pair| pair[0] == b' ' && pair[1] != b' ')
         .count();
     if is_last_line || gap_count == 0 {
-        draw_text_mirrored_y_glyphs(fb, font, line, x, baseline_y, false);
+        draw_text(fb, font, line, x, baseline_y, false);
         return;
     }
 
@@ -581,7 +593,7 @@ fn draw_justified_line(
         if byte == b' ' {
             if let Some(start) = word_start.take() {
                 let word = &line[start..index];
-                cursor_x = draw_text_mirrored_y_glyphs(fb, font, word, cursor_x, baseline_y, false);
+                cursor_x = draw_text(fb, font, word, cursor_x, baseline_y, false);
             }
             let mut gap = measure_text(font, " ") as i16 + extra_per_gap;
             if remainder > 0 {
@@ -594,6 +606,6 @@ fn draw_justified_line(
         }
     }
     if let Some(start) = word_start {
-        draw_text_mirrored_y_glyphs(fb, font, &line[start..], cursor_x, baseline_y, false);
+        draw_text(fb, font, &line[start..], cursor_x, baseline_y, false);
     }
 }
