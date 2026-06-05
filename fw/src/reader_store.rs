@@ -11,6 +11,7 @@ use proto::text::{TextAlign, TextRole};
 pub(crate) const MAX_LIBRARY_BOOKS: usize = 8;
 pub(crate) const MAX_SD_TOC_ITEMS: usize = 64;
 pub(crate) const MAX_BOOK_SECTIONS: usize = 96;
+const MAX_PUBLISHED_CHAPTER_EVENTS: usize = 60;
 pub(crate) const MAX_SD_TOC_TEXT_BYTES: usize = 4096;
 pub(crate) const MAX_READER_BLOCKS: usize = 384;
 pub(crate) const MAX_READER_PAGES: usize = 96;
@@ -620,7 +621,17 @@ impl ReaderStore {
     }
 
     pub(crate) fn chapter_count_for_ui(&self) -> u8 {
-        self.toc_count.min(u8::MAX as usize).max(1) as u8
+        if self.toc_count > 0 {
+            self.toc_count
+                .min(MAX_PUBLISHED_CHAPTER_EVENTS)
+                .min(u8::MAX as usize)
+                .max(1) as u8
+        } else {
+            self.book_section_count
+                .min(MAX_PUBLISHED_CHAPTER_EVENTS)
+                .min(u8::MAX as usize)
+                .max(1) as u8
+        }
     }
 
     pub(crate) fn push(
@@ -706,7 +717,12 @@ fn proto_style_for_display_style(style: FontStyle) -> proto::text::FontStyle {
 
 pub(crate) fn publish_chapter_pages(book_id: u32, store: &ReaderStore) {
     if store.toc_count > 0 {
-        for index in 0..store.toc_count.min(MAX_SD_TOC_ITEMS).min(u8::MAX as usize) {
+        for index in 0..store
+            .toc_count
+            .min(MAX_SD_TOC_ITEMS)
+            .min(MAX_PUBLISHED_CHAPTER_EVENTS)
+            .min(u8::MAX as usize)
+        {
             crate::tasks::display::send_library_event(LibraryEvent::ChapterPage {
                 book_id,
                 chapter: index as u8,
@@ -714,11 +730,16 @@ pub(crate) fn publish_chapter_pages(book_id: u32, store: &ReaderStore) {
             });
         }
     } else {
-        for index in 0..store.page_count.min(MAX_SD_TOC_ITEMS).min(u8::MAX as usize) {
+        for index in 0..store
+            .book_section_count
+            .min(MAX_SD_TOC_ITEMS)
+            .min(MAX_PUBLISHED_CHAPTER_EVENTS)
+            .min(u8::MAX as usize)
+        {
             crate::tasks::display::send_library_event(LibraryEvent::ChapterPage {
                 book_id,
                 chapter: index as u8,
-                page: index as u32,
+                page: store.book_sections[index].start_page,
             });
         }
     }

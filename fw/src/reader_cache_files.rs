@@ -218,6 +218,7 @@ where
         key,
         source_identity,
         section.section,
+        section.spine,
         section.page_count as usize,
         library,
     );
@@ -261,7 +262,8 @@ pub(crate) fn load_v2_section_cache<
     root: &Directory<'_, D, T, MAX_DIRS, MAX_FILES, MAX_VOLUMES>,
     key: &str,
     source_identity: (u32, u32),
-    spine: u16,
+    section: u16,
+    expected_spine: u16,
     target_pages: usize,
     library: &mut ReaderStore,
 ) -> CacheLoadResult
@@ -269,7 +271,7 @@ where
     D: embedded_sdmmc::BlockDevice,
     T: TimeSource,
 {
-    with_v2_section_file(root, key, spine, Mode::ReadOnly, |file| {
+    with_v2_section_file(root, key, section, Mode::ReadOnly, |file| {
         let mut header_bytes = [0u8; SECTION_V2_HEADER_BYTES];
         if read_exact_file(file, &mut header_bytes).is_err() {
             return CacheLoadResult::Invalid;
@@ -279,7 +281,7 @@ where
         };
         if header.source_hash != source_identity.0
             || header.source_size != source_identity.1
-            || header.spine != spine
+            || header.spine != expected_spine
         {
             return CacheLoadResult::Invalid;
         }
@@ -306,7 +308,7 @@ pub(crate) fn write_v2_section_cache<
     root: &Directory<'_, D, T, MAX_DIRS, MAX_FILES, MAX_VOLUMES>,
     key: &str,
     source_identity: (u32, u32),
-    spine: u16,
+    section: u16,
     library: &ReaderStore,
 ) -> bool
 where
@@ -317,11 +319,19 @@ where
         esp_println::println!("cache: v2 ensure dirs failed key={}", key);
         return false;
     }
-    with_v2_section_file(root, key, spine, Mode::ReadWriteCreateOrTruncate, |file| {
-        write_v2_section_body(file, source_identity, spine, library)
-    })
+    with_v2_section_file(
+        root,
+        key,
+        section,
+        Mode::ReadWriteCreateOrTruncate,
+        |file| write_v2_section_body(file, source_identity, library.cached_spine, library),
+    )
     .unwrap_or_else(|| {
-        esp_println::println!("cache: v2 open section failed key={} spine={}", key, spine);
+        esp_println::println!(
+            "cache: v2 open section failed key={} section={}",
+            key,
+            section
+        );
         false
     })
 }

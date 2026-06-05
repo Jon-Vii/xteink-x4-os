@@ -57,8 +57,9 @@ pub async fn run() {
 
                 let _ = POWER_EVENTS.try_send(PowerEvent::Activity);
                 let previous = state;
+                let previous_persisted = state.persisted();
                 state = state.apply_input(ctx, event);
-                let _pending_persist = state.persisted();
+                let next_persisted = state.persisted();
                 if let Some(command) = storage_command_for_transition(previous, state) {
                     if should_send_storage_immediately(command) {
                         log_storage_command("send", command);
@@ -68,6 +69,12 @@ pub async fn run() {
                         }
                     } else {
                         log_storage_command("queue", command);
+                        pending_storage = Some(command);
+                    }
+                }
+                if previous_persisted != next_persisted {
+                    let command = StorageCommand::StoreProgress(next_persisted);
+                    if STORAGE_COMMANDS.try_send(command).is_err() && pending_storage.is_none() {
                         pending_storage = Some(command);
                     }
                 }
@@ -142,13 +149,9 @@ fn library_event_affects_view(state: ReaderState, event: crate::LibraryEvent) ->
         }
         crate::LibraryEvent::Loaded {
             book_id,
-            pages,
-            chapters,
-        } => {
-            state.book_id == book_id
-                && (state.sd_page_count != pages.max(1)
-                    || state.sd_chapter_count != chapters.max(1))
-        }
+            pages: _,
+            chapters: _,
+        } => state.book_id == book_id,
         crate::LibraryEvent::ChapterPage {
             book_id,
             chapter,
@@ -223,29 +226,22 @@ fn storage_command_for_transition(
         return None;
     }
 
-    if previous.book_id != next.book_id
-        || previous.chapter != next.chapter
-        || previous.view != AppView::Reading
-    {
+    if previous.book_id != next.book_id || previous.view != AppView::Reading {
         return Some(StorageCommand::OpenBook {
             book_id: next.book_id,
             index,
             chapter: next.chapter,
-            target_pages: 5,
+            target_pages: next.page.min(u16::MAX as u32) as u16,
         });
     }
 
-    if next.page.saturating_add(2) >= next.sd_page_count {
+    if previous.page != next.page || previous.chapter != next.chapter {
         return Some(StorageCommand::ExtendSection {
             book_id: next.book_id,
             index,
             chapter: next.chapter,
-            target_pages: next.page.saturating_add(5).min(u16::MAX as u32) as u16,
+            target_pages: next.page.min(u16::MAX as u32) as u16,
         });
-    }
-
-    if previous.page != next.page {
-        return Some(StorageCommand::StoreProgress(next.persisted()));
     }
 
     None

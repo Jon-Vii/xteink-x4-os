@@ -442,13 +442,21 @@ where
     let mut saw_spine = false;
     let mut book_partial = false;
     let visible_page_capacity = library.page_capacity().max(1);
+    let start_spine_index = package
+        .text_reference_href
+        .and_then(|href| {
+            package
+                .spine
+                .iter()
+                .position(|item| href_matches_spine(href, item.href))
+        })
+        .unwrap_or_else(|| inferred_start_spine_index(&package));
 
-    for (spine_index, spine) in package
-        .spine
-        .iter()
-        .enumerate()
-        .filter(|(_, item)| !item.href.is_empty() && !spine_item_is_navigation(item, &package))
-    {
+    for (spine_index, spine) in package.spine.iter().enumerate().filter(|(index, item)| {
+        *index >= start_spine_index
+            && !item.href.is_empty()
+            && !spine_item_is_navigation(item, &package)
+    }) {
         if section_count >= sections.len() {
             book_partial = true;
             break;
@@ -572,6 +580,24 @@ fn spine_item_is_navigation(
         || lower_href.ends_with("nav.html")
 }
 
+fn inferred_start_spine_index(package: &proto::epub::EpubPackage<'_>) -> usize {
+    if package.spine.len() <= 1 {
+        return 0;
+    }
+    let Some(first) = package.spine.first() else {
+        return 0;
+    };
+    let lower_href = LowerAscii::<MAX_ENTRY_NAME_BYTES>::new(first.href);
+    if lower_href.contains("titlepage")
+        || lower_href.contains("title-page")
+        || lower_href.contains("cover")
+    {
+        1
+    } else {
+        0
+    }
+}
+
 fn valid_utf8_prefix_len(bytes: &[u8], complete: bool) -> Result<usize, ReaderCacheError> {
     match core::str::from_utf8(bytes) {
         Ok(_) => Ok(bytes.len()),
@@ -590,35 +616,35 @@ fn load_epub_toc<R>(
     R: ReadAt,
 {
     library.clear_toc();
-    let Some(toc_href) = package.nav_href.or(package.ncx_href) else {
-        return;
-    };
-    let mut toc_path = String::<MAX_ENTRY_NAME_BYTES>::new();
-    if resolve_epub_href(opf_path, toc_href, &mut toc_path).is_err() {
-        return;
-    }
-    let Ok(toc_entry) = zip.find_entry(&toc_path, scratch.header, scratch.name) else {
-        return;
-    };
-    let Ok(toc_len) = zip.read_entry_streamed(
-        toc_entry,
-        scratch.compressed,
-        scratch.xhtml,
-        scratch.zip_inflate,
-    ) else {
-        return;
-    };
-    let Ok(toc_text) = core::str::from_utf8(&scratch.xhtml[..toc_len]) else {
-        return;
-    };
+    for toc_href in [package.nav_href, package.ncx_href].into_iter().flatten() {
+        let mut toc_path = String::<MAX_ENTRY_NAME_BYTES>::new();
+        if resolve_epub_href(opf_path, toc_href, &mut toc_path).is_err() {
+            continue;
+        }
+        let Ok(toc_entry) = zip.find_entry(&toc_path, scratch.header, scratch.name) else {
+            continue;
+        };
+        let Ok(toc_len) = zip.read_entry_streamed(
+            toc_entry,
+            scratch.compressed,
+            scratch.xhtml,
+            scratch.zip_inflate,
+        ) else {
+            continue;
+        };
+        let Ok(toc_text) = core::str::from_utf8(&scratch.xhtml[..toc_len]) else {
+            continue;
+        };
 
-    let mut sink = LibraryTocSink { library, package };
-    let result = if toc_path.as_str().ends_with(".ncx") {
-        parse_epub2_ncx_to_sink(toc_text, &mut sink)
-    } else {
-        parse_epub3_nav_to_sink(toc_text, &mut sink)
-    };
-    if result.is_err() {
+        let mut sink = LibraryTocSink { library, package };
+        let result = if toc_path.as_str().ends_with(".ncx") {
+            parse_epub2_ncx_to_sink(toc_text, &mut sink)
+        } else {
+            parse_epub3_nav_to_sink(toc_text, &mut sink)
+        };
+        if result.is_ok() && sink.library.toc_count() > 0 {
+            return;
+        }
         sink.library.clear_toc();
     }
 }

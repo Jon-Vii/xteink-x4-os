@@ -103,6 +103,19 @@ fn fill_chapters<'a>(
         }
         return count;
     }
+    if ReaderSource::from_book_id(request.book_id).is_sd() {
+        let count = sd_library
+            .chapter_count_for_ui()
+            .max(1)
+            .min(chapters.len() as u8) as usize;
+        for item in chapters.iter_mut().take(count) {
+            *item = UiTocItem {
+                title: "Section",
+                level: 1,
+            };
+        }
+        return count;
+    }
 
     let count = (catalog::chapter_count() as usize).min(chapters.len());
     for (index, item) in chapters.iter_mut().take(count).enumerate() {
