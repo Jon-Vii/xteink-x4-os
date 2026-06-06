@@ -343,6 +343,7 @@ where
         "epub: stage TryV2BookIndexFast page={}",
         requested_global_page
     );
+    let mut fast_cache_hit_without_toc = false;
     match reader_cache_files::load_v2_book_index(root, cache_key.as_str(), source_identity, library)
     {
         BookIndexLoadResult::Hit => {
@@ -363,7 +364,11 @@ where
                         pages,
                         library.toc_count()
                     );
-                    return Ok(());
+                    if library.toc_count() > 0 {
+                        return Ok(());
+                    }
+                    fast_cache_hit_without_toc = true;
+                    esp_println::println!("epub: fast cache missing toc, parsing metadata only");
                 }
                 other => esp_println::println!("epub: fast book index section load {:?}", other),
             }
@@ -445,6 +450,26 @@ where
         library.toc_count
     );
     let css_rules = CssRules::new();
+
+    if fast_cache_hit_without_toc {
+        reader_layout::rebuild_toc_page_targets(library);
+        let wrote_index = reader_cache_files::write_v2_book_index(
+            root,
+            cache_key.as_str(),
+            source_identity,
+            library.advertised_page_count(),
+            &library.book_sections[..library.book_section_count],
+            library,
+            library.book_cache_partial,
+        );
+        esp_println::println!(
+            "epub: metadata upgraded after {} ms (toc={} wrote={})",
+            open_started.elapsed().as_millis(),
+            library.toc_count(),
+            wrote_index
+        );
+        return Ok(());
+    }
 
     esp_println::println!("epub: stage TryV2BookIndex page={}", requested_global_page);
     match reader_cache_files::load_v2_book_index(root, cache_key.as_str(), source_identity, library)

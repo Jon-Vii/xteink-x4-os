@@ -370,6 +370,8 @@ impl ReaderStore {
         self.blocks[index] = block;
         self.block_styles[index] = style;
         self.block_spine[index] = spine;
+        self.block_page_break_before[index] =
+            should_break_before_block(block.role, self.blocks.get(index.wrapping_sub(1)));
         true
     }
 
@@ -691,10 +693,23 @@ impl ReaderStore {
         };
         self.block_styles[self.block_count] = style;
         self.block_spine[self.block_count] = spine_index;
+        self.block_page_break_before[self.block_count] =
+            should_break_before_block(role, self.blocks.get(self.block_count.wrapping_sub(1)));
         self.block_paragraph_end[self.block_count] = paragraph_end;
         self.block_count += 1;
         true
     }
+}
+
+fn should_break_before_block(role: TextRole, previous: Option<&BlockRecord>) -> bool {
+    is_major_heading(role)
+        && previous
+            .map(|record| !is_major_heading(record.role))
+            .unwrap_or(false)
+}
+
+fn is_major_heading(role: TextRole) -> bool {
+    matches!(role, TextRole::Heading1 | TextRole::Heading2)
 }
 
 fn copy_string<const N: usize>(out: &mut String<N>, value: &str) {

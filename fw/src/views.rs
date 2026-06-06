@@ -108,9 +108,9 @@ fn fill_chapters<'a>(
             .chapter_count_for_ui()
             .max(1)
             .min(chapters.len() as u8) as usize;
-        for item in chapters.iter_mut().take(count) {
+        for (index, item) in chapters.iter_mut().take(count).enumerate() {
             *item = UiTocItem {
-                title: "Section",
+                title: fallback_chapter_title(index),
                 level: 1,
             };
         }
@@ -127,6 +127,36 @@ fn fill_chapters<'a>(
         }
     }
     count
+}
+
+fn fallback_chapter_title(index: usize) -> &'static str {
+    const TITLES: [&str; 24] = [
+        "Chapter 1",
+        "Chapter 2",
+        "Chapter 3",
+        "Chapter 4",
+        "Chapter 5",
+        "Chapter 6",
+        "Chapter 7",
+        "Chapter 8",
+        "Chapter 9",
+        "Chapter 10",
+        "Chapter 11",
+        "Chapter 12",
+        "Chapter 13",
+        "Chapter 14",
+        "Chapter 15",
+        "Chapter 16",
+        "Chapter 17",
+        "Chapter 18",
+        "Chapter 19",
+        "Chapter 20",
+        "Chapter 21",
+        "Chapter 22",
+        "Chapter 23",
+        "Chapter 24",
+    ];
+    TITLES.get(index).copied().unwrap_or("Chapter")
 }
 
 fn ui_library_status(status: LibraryScanStatus) -> UiLibraryStatus {
