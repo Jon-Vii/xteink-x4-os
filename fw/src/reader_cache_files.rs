@@ -1,16 +1,19 @@
-use crate::reader_store::ReaderStore;
-use crate::reader_store::{EMPTY_BOOK_SECTION_RECORD, MAX_BOOK_SECTIONS};
+use crate::reader_store::{
+    ReaderStore, EMPTY_BOOK_SECTION_RECORD, EMPTY_TOC_RECORD, MAX_BOOK_SECTIONS, MAX_SD_TOC_ITEMS,
+    MAX_SD_TOC_TEXT_BYTES,
+};
 use display::font::FontStyle;
 use embedded_sdmmc::{Directory, File, Mode, TimeSource};
 use heapless::String;
 use proto::cache::{
     decode_block, decode_book_v2_header, decode_book_v2_section, decode_page,
-    decode_section_header, decode_section_v2_header, encode_block, encode_book_v2_header,
-    encode_book_v2_section, encode_page, encode_section_v2_header, section_file_name, BookV2Header,
-    BookV2SectionRecord, SectionV2Header, BLOCK_RECORD_BYTES, BOOK_V2_HEADER_BYTES,
-    BOOK_V2_SECTION_RECORD_BYTES, CACHE_BOOK_FILE, CACHE_DIR, CACHE_ROOT_DIR, CACHE_SECTIONS_DIR,
-    CACHE_SECTION_FILE_BYTES, CACHE_STATE_FILE, CACHE_V2_DIR, PAGE_RECORD_BYTES,
-    SECTION_HEADER_BYTES, SECTION_V2_HEADER_BYTES,
+    decode_section_header, decode_section_v2_header, decode_toc, encode_block,
+    encode_book_v2_header, encode_book_v2_section, encode_page, encode_section_v2_header,
+    encode_toc, section_file_name, BookV2Header, BookV2SectionRecord, SectionV2Header,
+    BLOCK_RECORD_BYTES, BOOK_V2_HEADER_BYTES, BOOK_V2_SECTION_RECORD_BYTES, CACHE_BOOK_FILE,
+    CACHE_DIR, CACHE_ROOT_DIR, CACHE_SECTIONS_DIR, CACHE_SECTION_FILE_BYTES, CACHE_STATE_FILE,
+    CACHE_V2_DIR, PAGE_RECORD_BYTES, SECTION_HEADER_BYTES, SECTION_V2_HEADER_BYTES,
+    TOC_RECORD_BYTES,
 };
 
 const MIGRATE_MAX_SECTIONS: u16 = 16;
@@ -106,6 +109,8 @@ where
         if header.source_hash != source_identity.0
             || header.source_size != source_identity.1
             || header.section_count as usize > MAX_BOOK_SECTIONS
+            || header.toc_count as usize > MAX_SD_TOC_ITEMS
+            || header.toc_text_bytes as usize > MAX_SD_TOC_TEXT_BYTES
             || header.total_pages == 0
         {
             return BookIndexLoadResult::Invalid;
@@ -123,6 +128,38 @@ where
                 return BookIndexLoadResult::Invalid;
             }
             *slot = record;
+        }
+        let mut toc = [EMPTY_TOC_RECORD; MAX_SD_TOC_ITEMS];
+        for slot in toc.iter_mut().take(header.toc_count as usize) {
+            let mut record_bytes = [0u8; TOC_RECORD_BYTES];
+            if read_exact_file(file, &mut record_bytes).is_err() {
+                return BookIndexLoadResult::Invalid;
+            }
+            let Ok(record) = decode_toc(&record_bytes) else {
+                return BookIndexLoadResult::Invalid;
+            };
+            if !toc_record_fits_text(record, header.toc_text_bytes) {
+                return BookIndexLoadResult::Invalid;
+            }
+            *slot = record;
+        }
+        library.clear_toc();
+        if header.toc_text_bytes > 0 {
+            let text_len = header.toc_text_bytes as usize;
+            if read_exact_file(file, &mut library.toc_text[..text_len]).is_err() {
+                return BookIndexLoadResult::Invalid;
+            }
+            library.toc_text_len = text_len;
+            library.toc_count = header.toc_count as usize;
+            for (index, record) in toc
+                .iter()
+                .take(header.toc_count as usize)
+                .copied()
+                .enumerate()
+            {
+                library.toc[index] = record;
+                library.toc_page[index] = 0;
+            }
         }
         library.set_book_index(
             header.total_pages,
@@ -146,6 +183,7 @@ pub(crate) fn write_v2_book_index<
     source_identity: (u32, u32),
     total_pages: u32,
     sections: &[BookV2SectionRecord],
+    library: &ReaderStore,
     partial: bool,
 ) -> bool
 where
@@ -159,6 +197,10 @@ where
         return false;
     }
     with_v2_book_file(root, key, Mode::ReadWriteCreateOrTruncate, |file| {
+        let toc_count = library
+            .toc_count
+            .min(MAX_SD_TOC_ITEMS)
+            .min(u16::MAX as usize);
         let header = BookV2Header {
             source_hash: source_identity.0,
             source_size: source_identity.1,
@@ -170,7 +212,11 @@ where
                 .max()
                 .unwrap_or(0)
                 .min(u16::MAX as usize) as u16,
-            toc_count: 0,
+            toc_count: toc_count as u16,
+            toc_text_bytes: library
+                .toc_text_len
+                .min(MAX_SD_TOC_TEXT_BYTES)
+                .min(u32::MAX as usize) as u32,
             viewport_width: 800,
             viewport_height: 480,
             font_config: 1,
@@ -188,9 +234,35 @@ where
                 return false;
             }
         }
+        let mut toc_bytes = [0u8; TOC_RECORD_BYTES];
+        for record in library.toc.iter().take(toc_count).copied() {
+            if encode_toc(record, &mut toc_bytes).is_err() || file.write(&toc_bytes).is_err() {
+                return false;
+            }
+        }
+        if header.toc_text_bytes > 0
+            && file
+                .write(&library.toc_text[..header.toc_text_bytes as usize])
+                .is_err()
+        {
+            return false;
+        }
         true
     })
     .unwrap_or(false)
+}
+
+fn toc_record_fits_text(record: proto::cache::TocRecord, text_bytes: u32) -> bool {
+    range_fits(record.title_offset, record.title_len, text_bytes)
+        && range_fits(record.href_offset, record.href_len, text_bytes)
+        && range_fits(record.anchor_offset, record.anchor_len, text_bytes)
+}
+
+fn range_fits(offset: u32, len: u16, text_bytes: u32) -> bool {
+    offset
+        .checked_add(len as u32)
+        .map(|end| end <= text_bytes)
+        .unwrap_or(false)
 }
 
 pub(crate) fn load_v2_section_by_global_page<

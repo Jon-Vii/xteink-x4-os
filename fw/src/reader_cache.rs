@@ -357,10 +357,11 @@ where
                     library.set_book_labels(source_path, "");
                     reader_layout::rebuild_toc_page_targets(library);
                     esp_println::println!(
-                        "epub: v2 fast book cache ready after {} ms (total={} section_pages={})",
+                        "epub: v2 fast book cache ready after {} ms (total={} section_pages={} toc={})",
                         open_started.elapsed().as_millis(),
                         library.advertised_page_count(),
-                        pages
+                        pages,
+                        library.toc_count()
                     );
                     return Ok(());
                 }
@@ -459,10 +460,11 @@ where
                 CacheLoadResult::Hit { pages } => {
                     reader_layout::rebuild_toc_page_targets(library);
                     esp_println::println!(
-                        "epub: v2 book cache ready after {} ms (total={} section_pages={})",
+                        "epub: v2 book cache ready after {} ms (total={} section_pages={} toc={})",
                         open_started.elapsed().as_millis(),
                         library.advertised_page_count(),
-                        pages
+                        pages,
+                        library.toc_count()
                     );
                     return Ok(());
                 }
@@ -481,6 +483,7 @@ where
     let mut saw_spine = false;
     let mut book_partial = false;
     let visible_page_capacity = library.page_capacity().max(1);
+    let generate_toc_from_headings = library.toc_count() == 0;
     let start_spine_index = package
         .text_reference_href
         .and_then(|href| {
@@ -539,6 +542,8 @@ where
             dropping_paragraph: false,
             stopped: false,
             target_pages: visible_page_capacity,
+            generate_toc_from_headings,
+            generated_toc_for_spine: false,
         };
         match xhtml_blocks_to_sink(xhtml, Some(&css_rules), &mut sink) {
             Ok(()) => {}
@@ -563,6 +568,7 @@ where
             source_identity,
             total_pages,
             sections_slice,
+            library,
             book_partial,
         );
         library.set_book_index(total_pages, book_partial || !wrote_index, sections_slice);
@@ -861,6 +867,8 @@ struct LibraryBlockSink<
     dropping_paragraph: bool,
     stopped: bool,
     target_pages: usize,
+    generate_toc_from_headings: bool,
+    generated_toc_for_spine: bool,
 }
 
 impl<D, T, const MAX_DIRS: usize, const MAX_FILES: usize, const MAX_VOLUMES: usize>
@@ -1137,6 +1145,27 @@ fn flush_styled_preview_line<
     let role = sink.line_role;
     let align = sink.line_align;
     let style = reader_layout::first_styled_line_style(line.as_str()).unwrap_or(FontStyle::Regular);
+    if sink.generate_toc_from_headings
+        && !sink.generated_toc_for_spine
+        && matches!(
+            role,
+            TextRole::Heading1 | TextRole::Heading2 | TextRole::Heading3
+        )
+    {
+        let mut title = String::<160>::new();
+        push_plain_styled_text(line.as_str(), &mut title);
+        trim_trailing_space(&mut title);
+        if !title.is_empty()
+            && sink.library.push_toc_record(
+                title.as_str(),
+                "",
+                heading_toc_level(role),
+                sink.spine_index as i16,
+            )
+        {
+            sink.generated_toc_for_spine = true;
+        }
+    }
     let _ = sink.library.push_line_block(
         line.as_str(),
         style,
@@ -1148,6 +1177,30 @@ fn flush_styled_preview_line<
     sink.line.clear();
     sink.line_style = FontStyle::Regular;
     sink.pending_space = false;
+}
+
+fn heading_toc_level(role: TextRole) -> u8 {
+    match role {
+        TextRole::Heading1 => 1,
+        TextRole::Heading2 => 2,
+        TextRole::Heading3 => 3,
+        TextRole::Body | TextRole::BlockQuote => 1,
+    }
+}
+
+fn push_plain_styled_text<const N: usize>(styled: &str, out: &mut String<N>) {
+    let mut skip_style_code = false;
+    for ch in styled.chars() {
+        if skip_style_code {
+            skip_style_code = false;
+            continue;
+        }
+        if ch == reader_layout::STYLE_MARKER {
+            skip_style_code = true;
+            continue;
+        }
+        let _ = out.push(ch);
+    }
 }
 
 fn is_leading_punctuation_word(word: &str) -> bool {

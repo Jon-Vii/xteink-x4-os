@@ -3,7 +3,7 @@ use heapless::String;
 
 pub const CACHE_MAGIC: u32 = 0x5834_5244; // X4RD
 pub const CACHE_VERSION: u16 = 1;
-pub const CACHE_V2_VERSION: u16 = 9;
+pub const CACHE_V2_VERSION: u16 = 10;
 pub const CACHE_ROOT_DIR: &str = "XTEINK";
 pub const CACHE_DIR: &str = "CACHE";
 pub const CACHE_V2_DIR: &str = "CACHE2";
@@ -108,6 +108,7 @@ pub struct BookV2Header {
     pub section_count: u16,
     pub spine_count: u16,
     pub toc_count: u16,
+    pub toc_text_bytes: u32,
     pub viewport_width: u16,
     pub viewport_height: u16,
     pub font_config: u16,
@@ -220,7 +221,10 @@ pub fn section_v2_cache_size(header: SectionV2Header) -> usize {
 }
 
 pub fn book_v2_cache_size(header: BookV2Header) -> usize {
-    BOOK_V2_HEADER_BYTES + header.section_count as usize * BOOK_V2_SECTION_RECORD_BYTES
+    BOOK_V2_HEADER_BYTES
+        + header.section_count as usize * BOOK_V2_SECTION_RECORD_BYTES
+        + header.toc_count as usize * TOC_RECORD_BYTES
+        + header.toc_text_bytes as usize
 }
 
 pub fn cache_key_for(source_path: &str, source_len: u32) -> String<CACHE_KEY_BYTES> {
@@ -445,7 +449,7 @@ pub fn encode_book_v2_header(header: BookV2Header, out: &mut [u8]) -> Result<usi
     write_u16(out, 30, header.viewport_height);
     write_u16(out, 32, header.font_config);
     write_u16(out, 34, 0);
-    write_u32(out, 36, 0);
+    write_u32(out, 36, header.toc_text_bytes);
     write_u32(out, 40, 0);
     write_u32(out, 44, 0);
     Ok(BOOK_V2_HEADER_BYTES)
@@ -467,6 +471,7 @@ pub fn decode_book_v2_header(input: &[u8]) -> Result<BookV2Header, CacheError> {
         section_count: read_u16(input, 20)?,
         spine_count: read_u16(input, 22)?,
         toc_count: read_u16(input, 24)?,
+        toc_text_bytes: read_u32(input, 36)?,
         viewport_width: read_u16(input, 28)?,
         viewport_height: read_u16(input, 30)?,
         font_config: read_u16(input, 32)?,
@@ -986,6 +991,7 @@ mod tests {
             section_count: 2,
             spine_count: 9,
             toc_count: 4,
+            toc_text_bytes: 128,
             viewport_width: 800,
             viewport_height: 480,
             font_config: 1,
@@ -1008,7 +1014,7 @@ mod tests {
         assert_eq!(decode_book_v2_section(&section_bytes).unwrap(), section);
         assert_eq!(
             book_v2_cache_size(header),
-            BOOK_V2_HEADER_BYTES + BOOK_V2_SECTION_RECORD_BYTES * 2
+            BOOK_V2_HEADER_BYTES + BOOK_V2_SECTION_RECORD_BYTES * 2 + TOC_RECORD_BYTES * 4 + 128
         );
 
         header_bytes[4] = CACHE_VERSION as u8;
