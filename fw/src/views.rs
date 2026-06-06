@@ -275,7 +275,7 @@ fn draw_reader_footer(
     sd_library: &ReaderStore,
     page_count: u32,
 ) {
-    let font = literata(FontStyle::Italic);
+    let font = literata(FontStyle::Bold);
     let fallback = catalog::active_book(request.book_id);
     let (title, _) = sd_library.active_book_labels(request.book_id, fallback.title, "");
 
@@ -298,39 +298,44 @@ fn draw_reader_footer(
     let mut label = String::<32>::new();
     let _ = write!(label, "{}/{}", section_current, section_total);
     let label_width = measure_text(font, label.as_str()) as i16;
-    let label_x = (READER_RIGHT_X - label_width).max(620);
-    draw_text_truncated_local(fb, font, title, 8, 476, label_x - 18);
-    draw_text(fb, font, label.as_str(), label_x, 476, false);
+    let footer_y = 477;
+    let footer_pad = 16;
+    let label_x = READER_RIGHT_X - label_width - footer_pad;
+    let title_right = label_x - 14;
+    draw_text_centered_truncated_local(fb, font, title, footer_pad, title_right, footer_y);
+    draw_text(fb, font, label.as_str(), label_x, footer_y, false);
 }
 
-fn draw_text_truncated_local(
+fn draw_text_centered_truncated_local(
     fb: &mut Framebuffer,
     font: &'static display::font::BitmapFont,
     text: &str,
-    x: i16,
+    left: i16,
+    right: i16,
     y: i16,
-    max_width: i16,
 ) {
-    if measure_text(font, text) as i16 <= max_width {
-        draw_text(fb, font, text, x, y, false);
+    let max_width = (right - left).max(0);
+    if max_width == 0 {
         return;
     }
+    let width = measure_text(font, text) as i16;
+    if width <= max_width {
+        draw_text(fb, font, text, left + (max_width - width) / 2, y, false);
+        return;
+    }
+
     let mut end = text.len();
     while end > 0 {
-        while end > 0 && !text.is_char_boundary(end) {
+        while !text.is_char_boundary(end) {
             end -= 1;
         }
         let candidate = &text[..end];
-        if measure_text(font, candidate) as i16 <= max_width - 18 {
+        let candidate_width = measure_text(font, candidate) as i16;
+        let ellipsis_width = measure_text(font, "...") as i16;
+        if candidate_width + ellipsis_width <= max_width {
+            let x = left + (max_width - candidate_width - ellipsis_width) / 2;
             draw_text(fb, font, candidate, x, y, false);
-            draw_text(
-                fb,
-                font,
-                "...",
-                x + measure_text(font, candidate) as i16 + 4,
-                y,
-                false,
-            );
+            draw_text(fb, font, "...", x + candidate_width, y, false);
             return;
         }
         end = end.saturating_sub(1);
