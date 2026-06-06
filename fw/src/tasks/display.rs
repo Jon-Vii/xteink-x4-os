@@ -189,7 +189,7 @@ fn handle_storage_command(
                 target_pages as usize,
                 scratch,
             );
-            send_library_event(LibraryEvent::Loaded {
+            send_required_library_event(LibraryEvent::Loaded {
                 book_id,
                 pages: sd_library.advertised_page_count(),
                 chapters: sd_library.chapter_count_for_ui(),
@@ -219,6 +219,23 @@ fn handle_storage_command(
                 },
             );
         }
+    }
+}
+
+pub(crate) fn send_optional_library_event(event: LibraryEvent) -> bool {
+    LIBRARY_EVENTS.try_send(event).is_ok()
+}
+
+fn send_required_library_event(event: LibraryEvent) {
+    const RETRIES: usize = 8;
+    for _ in 0..RETRIES {
+        if LIBRARY_EVENTS.try_send(event).is_ok() {
+            return;
+        }
+        let _ = LIBRARY_EVENTS.try_receive();
+    }
+    if LIBRARY_EVENTS.try_send(event).is_err() {
+        esp_println::println!("display: required library event queue full");
     }
 }
 

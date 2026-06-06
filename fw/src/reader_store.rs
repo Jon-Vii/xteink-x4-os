@@ -738,11 +738,14 @@ pub(crate) fn publish_chapter_pages(book_id: u32, store: &ReaderStore) {
             .min(MAX_PUBLISHED_CHAPTER_EVENTS)
             .min(u8::MAX as usize)
         {
-            crate::tasks::display::send_library_event(LibraryEvent::ChapterPage {
+            if !crate::tasks::display::send_optional_library_event(LibraryEvent::ChapterPage {
                 book_id,
                 chapter: index as u8,
                 page: store.toc_page[index] as u32,
-            });
+            }) {
+                esp_println::println!("display: chapter page event queue full");
+                break;
+            }
         }
     } else {
         for index in 0..store
@@ -751,11 +754,14 @@ pub(crate) fn publish_chapter_pages(book_id: u32, store: &ReaderStore) {
             .min(MAX_PUBLISHED_CHAPTER_EVENTS)
             .min(u8::MAX as usize)
         {
-            crate::tasks::display::send_library_event(LibraryEvent::ChapterPage {
+            if !crate::tasks::display::send_optional_library_event(LibraryEvent::ChapterPage {
                 book_id,
                 chapter: index as u8,
                 page: store.book_sections[index].start_page,
-            });
+            }) {
+                esp_println::println!("display: chapter page event queue full");
+                break;
+            }
         }
     }
 }
