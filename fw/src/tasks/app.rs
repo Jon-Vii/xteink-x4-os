@@ -59,6 +59,7 @@ pub async fn run() {
 
                 if opening_book.is_some() || suppress_input_until_open_settled {
                     esp_println::println!("app: input ignored while book open pending");
+                    drain_input_events();
                     continue;
                 }
 
@@ -134,6 +135,7 @@ pub async fn run() {
                         rendering = true;
                         render_pending = false;
                     } else if suppress_input_until_open_settled && opening_book.is_none() {
+                        drain_input_events();
                         suppress_input_until_open_settled = false;
                     }
                 }
@@ -148,6 +150,7 @@ pub async fn run() {
                     if let Some(book_id) = loaded_book_id(event) {
                         if opening_book == Some(book_id) {
                             opening_book = None;
+                            drain_input_events();
                         }
                     }
                     let should_render = library_event_affects_view(state, event);
@@ -168,6 +171,7 @@ pub async fn run() {
                 if let Some(book_id) = loaded_book_id(event) {
                     if opening_book == Some(book_id) {
                         opening_book = None;
+                        drain_input_events();
                     }
                 }
                 let should_render = library_event_affects_view(state, event);
@@ -229,7 +233,8 @@ fn should_wait_for_loaded_before_render(command: StorageCommand) -> bool {
 
 fn open_book_id(command: StorageCommand) -> Option<u32> {
     match command {
-        StorageCommand::OpenBook { book_id, .. } => Some(book_id),
+        StorageCommand::OpenBook { book_id, .. }
+        | StorageCommand::ExtendSection { book_id, .. } => Some(book_id),
         _ => None,
     }
 }
@@ -239,6 +244,10 @@ fn loaded_book_id(event: crate::LibraryEvent) -> Option<u32> {
         crate::LibraryEvent::Loaded { book_id, .. } => Some(book_id),
         _ => None,
     }
+}
+
+fn drain_input_events() {
+    while INPUT_EVENTS.try_receive().is_ok() {}
 }
 
 async fn send_render(kind: RenderKind, state: ReaderState) {
@@ -292,23 +301,42 @@ fn storage_command_for_transition(
         return None;
     }
 
-    if previous.book_id != next.book_id || previous.view != AppView::Reading {
-        return Some(StorageCommand::OpenBook {
-            book_id: next.book_id,
-            index,
-            chapter: next.chapter,
-            target_pages: next.page.min(u16::MAX as u32) as u16,
-        });
+    if previous.book_id != next.book_id {
+        return Some(open_book_command(next, index));
+    }
+
+    if previous.view != AppView::Reading {
+        if previous.view == AppView::Chapters {
+            return if previous.page != next.page || previous.chapter != next.chapter {
+                Some(extend_section_command(next, index))
+            } else {
+                None
+            };
+        }
+        return Some(open_book_command(next, index));
     }
 
     if previous.page != next.page || previous.chapter != next.chapter {
-        return Some(StorageCommand::ExtendSection {
-            book_id: next.book_id,
-            index,
-            chapter: next.chapter,
-            target_pages: next.page.min(u16::MAX as u32) as u16,
-        });
+        return Some(extend_section_command(next, index));
     }
 
     None
+}
+
+fn open_book_command(state: ReaderState, index: u8) -> StorageCommand {
+    StorageCommand::OpenBook {
+        book_id: state.book_id,
+        index,
+        chapter: state.chapter,
+        target_pages: state.page.min(u16::MAX as u32) as u16,
+    }
+}
+
+fn extend_section_command(state: ReaderState, index: u8) -> StorageCommand {
+    StorageCommand::ExtendSection {
+        book_id: state.book_id,
+        index,
+        chapter: state.chapter,
+        target_pages: state.page.min(u16::MAX as u32) as u16,
+    }
 }
