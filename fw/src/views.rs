@@ -181,15 +181,11 @@ fn draw_sd_reader_page(fb: &mut Framebuffer, request: RenderRequest, sd_library:
     let selected_book_loaded =
         sd_library.loaded_index == ReaderStore::selected_book_index(request.book_id);
     match (sd_library.reader_status(), selected_book_loaded) {
-        (_, false) => {
-            draw_ascii(fb, "OPENING EPUB", 20, 72, false);
-        }
-        (BookLoadStatus::Empty | BookLoadStatus::Loading, _) => {
-            draw_ascii(fb, "OPENING EPUB", 20, 72, false);
+        (_, false) | (BookLoadStatus::Empty | BookLoadStatus::Loading, _) => {
+            draw_sd_reader_loading(fb, request, sd_library);
         }
         (BookLoadStatus::Error, _) => {
-            draw_ascii(fb, "COULD NOT OPEN EPUB", 20, 72, false);
-            draw_ascii(fb, sd_library.reader_error(), 20, 104, false);
+            draw_sd_reader_error(fb, request, sd_library);
         }
         (BookLoadStatus::Ready, _) => {
             let plan = reader_layout::ReaderPagePlan::new(sd_library, request.page);
@@ -310,6 +306,76 @@ fn draw_reader_footer(
     let title_right = label_x - 14;
     draw_text_centered_truncated_local(fb, title_font, title, footer_pad, title_right, footer_y);
     draw_text(fb, label_font, label.as_str(), label_x, footer_y, false);
+}
+
+fn draw_sd_reader_loading(
+    fb: &mut Framebuffer,
+    request: RenderRequest,
+    sd_library: &ReaderStore,
+) {
+    let title_font = literata(FontStyle::Bold);
+    let author_font = literata(FontStyle::Italic);
+    let fallback = catalog::active_book(request.book_id);
+    let (title, author) =
+        sd_library.active_book_labels(request.book_id, fallback.title, fallback.author);
+
+    // Vertically center title + author block within the reader page region.
+    let title_y = 232i16;
+    let author_y = title_y + 36;
+    draw_text_centered_truncated_local(
+        fb,
+        title_font,
+        title,
+        READER_LEFT_X,
+        READER_RIGHT_X,
+        title_y,
+    );
+    if !author.is_empty() {
+        draw_text_centered_truncated_local(
+            fb,
+            author_font,
+            author,
+            READER_LEFT_X,
+            READER_RIGHT_X,
+            author_y,
+        );
+    }
+}
+
+fn draw_sd_reader_error(
+    fb: &mut Framebuffer,
+    request: RenderRequest,
+    sd_library: &ReaderStore,
+) {
+    let title_font = literata(FontStyle::Bold);
+    let body_font = literata(FontStyle::Regular);
+    let fallback = catalog::active_book(request.book_id);
+    let (title, _) = sd_library.active_book_labels(request.book_id, fallback.title, "");
+
+    let title_y = 224i16;
+    let message_y = title_y + 40;
+    draw_text_centered_truncated_local(
+        fb,
+        title_font,
+        title,
+        READER_LEFT_X,
+        READER_RIGHT_X,
+        title_y,
+    );
+    let error = sd_library.reader_error();
+    let message: &str = if error.is_empty() {
+        "Could not open this book."
+    } else {
+        error
+    };
+    draw_text_centered_truncated_local(
+        fb,
+        body_font,
+        message,
+        READER_LEFT_X,
+        READER_RIGHT_X,
+        message_y,
+    );
 }
 
 fn draw_text_centered_truncated_local(
