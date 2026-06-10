@@ -2207,14 +2207,24 @@ enum TokEvent<'a> {
     Text(&'a str),
 }
 
+/// Longest text suffix held back at a forced mid-text flush so an HTML
+/// entity is never split across two Text events ("&#x10FFFF;" is 10
+/// bytes; named entities top out around "&hellip;").
+const STREAM_ENTITY_HOLDBACK_BYTES: usize = 12;
+
 /// Byte-level XML tokenizer. Emits StartTag/EndTag/Text events with all
 /// content held in bounded internal buffers — never borrows from the caller's
 /// input. Comments/PI/doctype tags are treated as opaque skip-until-`>` blocks,
 /// matching the imperfections (but bounded behaviour) of [`XmlCursor`].
+///
+/// Text accumulates as raw bytes: a forced flush when the buffer fills
+/// holds back incomplete UTF-8 sequences and incomplete entities, so the
+/// emitted `&str` chunks are always valid UTF-8 and never split an
+/// entity, regardless of how the input is chunked.
 pub struct StreamingXmlTokenizer {
     state: TokState,
     tag_buf: heapless::String<STREAM_TAG_BUF_BYTES>,
-    text_buf: heapless::String<STREAM_TEXT_CHUNK_BYTES>,
+    text_buf: heapless::Vec<u8, STREAM_TEXT_CHUNK_BYTES>,
     tag_overflow: bool,
 }
 
@@ -2223,7 +2233,7 @@ impl StreamingXmlTokenizer {
         Self {
             state: TokState::Text,
             tag_buf: heapless::String::new(),
-            text_buf: heapless::String::new(),
+            text_buf: heapless::Vec::new(),
             tag_overflow: false,
         }
     }
@@ -2262,9 +2272,9 @@ impl StreamingXmlTokenizer {
         self.finish(&mut |event| parser.handle(event, sink))
     }
 
-    fn feed<F>(&mut self, bytes: &[u8], emit: &mut F) -> Result<(), TocStreamError>
+    fn feed<F, E>(&mut self, bytes: &[u8], emit: &mut F) -> Result<(), E>
     where
-        F: FnMut(TokEvent<'_>) -> Result<(), TocStreamError>,
+        F: FnMut(TokEvent<'_>) -> Result<(), E>,
     {
         for &byte in bytes {
             self.consume(byte, emit)?;
@@ -2272,28 +2282,24 @@ impl StreamingXmlTokenizer {
         Ok(())
     }
 
-    fn finish<F>(&mut self, emit: &mut F) -> Result<(), TocStreamError>
+    fn finish<F, E>(&mut self, emit: &mut F) -> Result<(), E>
     where
-        F: FnMut(TokEvent<'_>) -> Result<(), TocStreamError>,
+        F: FnMut(TokEvent<'_>) -> Result<(), E>,
     {
-        if matches!(self.state, TokState::Text) && !self.text_buf.is_empty() {
-            emit(TokEvent::Text(self.text_buf.as_str()))?;
-            self.text_buf.clear();
+        if matches!(self.state, TokState::Text) {
+            self.flush_text(emit, true)?;
         }
         Ok(())
     }
 
-    fn consume<F>(&mut self, byte: u8, emit: &mut F) -> Result<(), TocStreamError>
+    fn consume<F, E>(&mut self, byte: u8, emit: &mut F) -> Result<(), E>
     where
-        F: FnMut(TokEvent<'_>) -> Result<(), TocStreamError>,
+        F: FnMut(TokEvent<'_>) -> Result<(), E>,
     {
         match self.state {
             TokState::Text => {
                 if byte == b'<' {
-                    if !self.text_buf.is_empty() {
-                        emit(TokEvent::Text(self.text_buf.as_str()))?;
-                        self.text_buf.clear();
-                    }
+                    self.flush_text(emit, true)?;
                     self.state = TokState::Tag;
                     self.tag_buf.clear();
                     self.tag_overflow = false;
@@ -2342,18 +2348,76 @@ impl StreamingXmlTokenizer {
         }
     }
 
-    fn push_text_byte<F>(&mut self, byte: u8, emit: &mut F) -> Result<(), TocStreamError>
+    fn push_text_byte<F, E>(&mut self, byte: u8, emit: &mut F) -> Result<(), E>
     where
-        F: FnMut(TokEvent<'_>) -> Result<(), TocStreamError>,
+        F: FnMut(TokEvent<'_>) -> Result<(), E>,
     {
-        if self.text_buf.push(byte as char).is_err() {
-            if !self.text_buf.is_empty() {
-                emit(TokEvent::Text(self.text_buf.as_str()))?;
-                self.text_buf.clear();
-            }
-            let _ = self.text_buf.push(byte as char);
+        if self.text_buf.push(byte).is_err() {
+            self.flush_text(emit, false)?;
+            let _ = self.text_buf.push(byte);
         }
         Ok(())
+    }
+
+    /// Emit buffered text as valid UTF-8. At a tag boundary the whole
+    /// buffer drains (a malformed trailing sequence cannot be completed by
+    /// later bytes and is dropped). At a forced mid-text flush, incomplete
+    /// UTF-8 sequences and incomplete trailing entities are held back so
+    /// later bytes can complete them. Invalid bytes are skipped.
+    fn flush_text<F, E>(&mut self, emit: &mut F, at_tag_boundary: bool) -> Result<(), E>
+    where
+        F: FnMut(TokEvent<'_>) -> Result<(), E>,
+    {
+        loop {
+            if self.text_buf.is_empty() {
+                return Ok(());
+            }
+            let (valid_len, invalid_skip) = match core::str::from_utf8(&self.text_buf) {
+                Ok(_) => (self.text_buf.len(), 0),
+                Err(error) => (error.valid_up_to(), error.error_len().unwrap_or(0)),
+            };
+            if invalid_skip > 0 {
+                if let Ok(text) = core::str::from_utf8(&self.text_buf[..valid_len]) {
+                    if !text.is_empty() {
+                        emit(TokEvent::Text(text))?;
+                    }
+                }
+                self.drain_text_prefix(valid_len + invalid_skip);
+                continue;
+            }
+
+            let mut emit_len = valid_len;
+            if !at_tag_boundary {
+                if let Ok(text) = core::str::from_utf8(&self.text_buf[..valid_len]) {
+                    if let Some(amp) = text.rfind('&') {
+                        let tail = &text[amp..];
+                        if !tail.contains(';') && tail.len() <= STREAM_ENTITY_HOLDBACK_BYTES {
+                            emit_len = amp;
+                        }
+                    }
+                }
+            }
+            if emit_len > 0 {
+                if let Ok(text) = core::str::from_utf8(&self.text_buf[..emit_len]) {
+                    if !text.is_empty() {
+                        emit(TokEvent::Text(text))?;
+                    }
+                }
+            }
+            if at_tag_boundary {
+                self.text_buf.clear();
+            } else {
+                self.drain_text_prefix(emit_len);
+            }
+            return Ok(());
+        }
+    }
+
+    fn drain_text_prefix(&mut self, prefix_len: usize) {
+        let len = self.text_buf.len();
+        let prefix_len = prefix_len.min(len);
+        self.text_buf.as_mut_slice().copy_within(prefix_len.., 0);
+        self.text_buf.truncate(len - prefix_len);
     }
 }
 
@@ -3703,6 +3767,54 @@ mod tests {
         assert_eq!(sink.items[1].0.as_str(), "Part A");
         assert_eq!(sink.items[1].2, 2);
         assert_eq!(sink.items[2].0.as_str(), "The Machine");
+    }
+
+    #[test]
+    fn ncx_stream_keeps_multibyte_titles_across_any_chunking() {
+        struct CountingSink(Vec<(heapless::String<64>, heapless::String<64>, u8), 16>);
+        impl EpubTocSink for CountingSink {
+            fn push_toc(&mut self, title: &str, href: &str, level: u8) -> Result<(), TocError> {
+                let mut t = heapless::String::<64>::new();
+                let mut h = heapless::String::<64>::new();
+                let _ = t.push_str(title);
+                let _ = h.push_str(href);
+                self.0
+                    .push((t, h, level))
+                    .map_err(|_| TocError::TooManyItems)
+            }
+        }
+
+        let ncx = "<ncx><navMap>\
+            <navPoint><navLabel><text>Pr\u{e9}face \u{2014} \u{4e16}\u{754c}</text></navLabel>\
+            <content src=\"ch1.xhtml\"/></navPoint>\
+            <navPoint><navLabel><text>Caf\u{e9} &amp; r\u{ea}ve</text></navLabel>\
+            <content src=\"ch2.xhtml\"/></navPoint>\
+            </navMap></ncx>";
+
+        let mut slice_sink = CountingSink(Vec::new());
+        parse_epub2_ncx_to_sink(ncx, &mut slice_sink).expect("slice parses");
+        assert_eq!(slice_sink.0.len(), 2);
+
+        // One byte at a time: every UTF-8 sequence and the entity get
+        // split across feed calls, which the old char-per-byte text
+        // accumulation turned into mojibake.
+        let mut tokenizer = StreamingXmlTokenizer::new();
+        let mut parser = NcxStreamParser::new();
+        let mut stream_sink = CountingSink(Vec::new());
+        for byte in ncx.as_bytes() {
+            tokenizer
+                .feed_ncx(core::slice::from_ref(byte), &mut parser, &mut stream_sink)
+                .expect("byte feeds");
+        }
+        tokenizer
+            .finish_ncx(&mut parser, &mut stream_sink)
+            .expect("finish");
+
+        assert_eq!(slice_sink.0.len(), stream_sink.0.len());
+        for (a, b) in slice_sink.0.iter().zip(stream_sink.0.iter()) {
+            assert_eq!(a.0.as_str(), b.0.as_str());
+            assert_eq!(a.1.as_str(), b.1.as_str());
+        }
     }
 
     #[test]
