@@ -1,5 +1,6 @@
 use embassy_time::{Duration, Timer};
 use embedded_hal::digital::{InputPin, OutputPin};
+use embedded_hal_async::digital::Wait;
 use embedded_hal_async::spi::SpiBus;
 
 pub struct EpdBus<SPI, CS, DC, BUSY, RST> {
@@ -15,7 +16,7 @@ where
     SPI: SpiBus,
     CS: OutputPin,
     DC: OutputPin,
-    BUSY: InputPin,
+    BUSY: InputPin + Wait,
     RST: OutputPin,
 {
     pub fn new(spi: SPI, cs: CS, dc: DC, busy: BUSY, rst: RST) -> Self {
@@ -76,15 +77,15 @@ where
     }
 
     pub async fn wait_ready(&mut self) {
+        // Give BUSY time to assert after a command before the level wait;
+        // a too-early check would sail straight through a refresh.
         Timer::after_millis(1).await;
-        let mut polls = 0u16;
-        while self.busy.is_high().unwrap_or(false) {
-            if polls >= 750 {
-                break;
-            }
-            polls += 1;
-            Timer::after(Duration::from_millis(20)).await;
-        }
+        // BUSY is active high. The interrupt-driven level wait returns
+        // immediately if the pin is already low, replacing the 20 ms poll
+        // loop's wake-ups and exit jitter; the ceiling matches the poll
+        // loop's previous ~15 s give-up.
+        let _ =
+            embassy_time::with_timeout(Duration::from_secs(15), self.busy.wait_for_low()).await;
     }
 
     pub fn deselect_display(&mut self) {
