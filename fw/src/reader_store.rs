@@ -459,6 +459,22 @@ impl ReaderStore {
         self.current_section_page_count = page_count.min(u16::MAX as usize) as u16;
     }
 
+    /// True when `global_page` of catalog entry `index` is already
+    /// renderable from the loaded in-RAM section window, so an open or
+    /// extend request needs no SD session at all. Partial sections keep
+    /// going to SD so the bounded prefix can be regrown.
+    pub(crate) fn covers_global_page(&self, index: usize, global_page: u32) -> bool {
+        self.loaded_index == Some(index)
+            && matches!(self.reader_status, BookLoadStatus::Ready)
+            && !self.section_partial
+            && self.page_count > 0
+            && global_page >= self.current_section_start_page
+            && global_page
+                < self
+                    .current_section_start_page
+                    .saturating_add(self.current_section_page_count as u32)
+    }
+
     pub(crate) fn local_page_for_global(&self, global_page: u32) -> usize {
         global_page
             .saturating_sub(self.current_section_start_page)

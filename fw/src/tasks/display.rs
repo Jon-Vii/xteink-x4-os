@@ -192,6 +192,24 @@ fn handle_storage_command(
                 );
                 return;
             }
+            // The requested page is usually inside the section window that
+            // is already loaded; answering from RAM keeps ordinary page
+            // turns free of card init, FAT, and cache-file traffic.
+            if sd_library.covers_global_page(index as usize, target_pages as u32) {
+                esp_println::println!(
+                    "storage: open hit in RAM request={} book_id={} page={}",
+                    request_id,
+                    book_id,
+                    target_pages
+                );
+                send_loaded_library_event(LibraryEvent::Loaded {
+                    book_id,
+                    pages: sd_library.advertised_page_count(),
+                    chapters: sd_library.chapter_count_for_ui(),
+                    chapter_pages: crate::reader_store::chapter_pages_for_event(sd_library),
+                });
+                return;
+            }
             esp_println::println!(
                 "storage: open command request={} book_id={} index={} chapter={} target={}",
                 request_id,
