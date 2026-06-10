@@ -5,9 +5,18 @@ use embedded_hal::spi::{Operation, SpiBus as BlockingSpiBus, SpiDevice};
 use embedded_sdmmc::{Directory, SdCard, TimeSource, Timestamp, VolumeIdx, VolumeManager};
 use esp_hal::gpio::Output;
 use esp_hal::peripherals::SPI2;
+use esp_hal::prelude::*;
 use esp_hal::spi::master::SpiDmaBus;
 use esp_hal::spi::FullDuplexMode;
 use esp_hal::Async;
+
+/// SD SPI-mode identification must run at 100-400 kHz; data transfer is
+/// specced to 25 MHz. The shared bus otherwise runs at the SSD1677's
+/// 40 MHz, which is out of SD spec entirely and what the read-retry
+/// machinery in the EPUB path was quietly absorbing.
+const SD_IDENT_FREQ_KHZ: u32 = 400;
+const SD_DATA_FREQ_MHZ: u32 = 20;
+const DISPLAY_FREQ_MHZ: u32 = 40;
 
 pub(crate) struct StaticTime;
 
@@ -170,6 +179,16 @@ pub(crate) fn with_root<R>(
     sd_cs.set_high();
     esp_println::println!("sd: session enter");
 
+    // Identification phase: 400 kHz with at least 74 wake clocks while no
+    // chip select is asserted, per the SD spec and embedded-sdmmc's docs.
+    {
+        let spi = epd.spi_mut();
+        spi.change_bus_frequency(SD_IDENT_FREQ_KHZ.kHz());
+        let mut wake = [0xFFu8; 10];
+        let _ = BlockingSpiBus::transfer_in_place(spi, &mut wake);
+        let _ = BlockingSpiBus::flush(spi);
+    }
+
     let result = {
         let spi = SdSpiDevice {
             spi: epd.spi_mut(),
@@ -182,6 +201,9 @@ pub(crate) fn with_root<R>(
             Err(SdSessionError::CardInit)
         } else {
             esp_println::println!("sd: card ready");
+            // Card acquired: switch to the in-spec data rate for the rest
+            // of the session.
+            card.spi(|device| device.spi.change_bus_frequency(SD_DATA_FREQ_MHZ.MHz()));
             let volume_mgr: VolumeManager<_, _, 8, 8, 1> =
                 VolumeManager::new_with_limits(card, StaticTime, 5000);
             let result = match volume_mgr.open_volume(VolumeIdx(0)) {
@@ -209,5 +231,7 @@ pub(crate) fn with_root<R>(
 
     esp_println::println!("sd: session exit");
     sd_cs.set_high();
+    epd.spi_mut()
+        .change_bus_frequency(DISPLAY_FREQ_MHZ.MHz());
     result
 }
