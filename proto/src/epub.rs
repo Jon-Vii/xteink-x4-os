@@ -412,7 +412,7 @@ where
         name_scratch: &mut [u8],
     ) -> Result<OwnedZipEntry, ZipError> {
         if let Some(central) = self.central_cache {
-            return find_entry_in_central_cache(central, self.entry_count, name, name_scratch);
+            return find_entry_in_central_cache(central, self.entry_count, name);
         }
         let mut cursor = self.central_offset;
         for _ in 0..self.entry_count {
@@ -956,7 +956,6 @@ fn find_entry_in_central_cache(
     central: &[u8],
     entry_count: u16,
     name: &str,
-    name_scratch: &mut [u8],
 ) -> Result<OwnedZipEntry, ZipError> {
     let mut cursor = 0usize;
     for _ in 0..entry_count {
@@ -970,9 +969,6 @@ fn find_entry_in_central_cache(
         let extra_len = read_u16(central, cursor + 30)? as usize;
         let comment_len = read_u16(central, cursor + 32)? as usize;
         let local_header_offset = read_u32(central, cursor + 42)?;
-        if name_len > name_scratch.len() {
-            return Err(ZipError::EntryBufferTooSmall);
-        }
 
         let name_start = cursor
             .checked_add(46)
@@ -983,11 +979,7 @@ fn find_entry_in_central_cache(
         let entry_name = central
             .get(name_start..name_end)
             .ok_or(ZipError::BadCentralDirectory)?;
-        name_scratch[..name_len].copy_from_slice(entry_name);
-        if core::str::from_utf8(&name_scratch[..name_len])
-            .map(|entry_name| entry_name == name)
-            .unwrap_or(false)
-        {
+        if entry_name == name.as_bytes() {
             return Ok(OwnedZipEntry {
                 compression_method,
                 compressed_size,
