@@ -165,7 +165,6 @@ impl RefreshPlanner {
             || last.kind == RenderKind::Boot
             || request.view != last.view
             || request.book_id != last.book_id
-            || Self::needs_clean_selection_refresh(request, last)
             || Self::needs_clean_library_refresh(request, last)
         {
             return RefreshMode::Full;
@@ -193,10 +192,6 @@ impl RefreshPlanner {
         self.screen_on = false;
         self.fast_refreshes = 0;
         self.last_request = None;
-    }
-
-    fn needs_clean_selection_refresh(request: RenderRequest, last: RenderRequest) -> bool {
-        request.view == AppView::Settings && request.selection != last.selection
     }
 
     fn needs_clean_library_refresh(request: RenderRequest, last: RenderRequest) -> bool {
@@ -935,7 +930,7 @@ mod tests {
     }
 
     #[test]
-    fn refresh_plan_uses_full_for_context_and_selection_changes() {
+    fn refresh_plan_uses_full_for_context_changes_and_fast_for_selection() {
         let mut planner = RefreshPlanner::new();
         let mut request = ReaderState::boot().render_request(RenderKind::Boot);
 
@@ -949,7 +944,14 @@ mod tests {
         assert_eq!(planner.mode_for(request), RefreshMode::Full);
         planner.record_render(request, RefreshMode::Full);
 
+        // Cursor moves inside Settings ride the fast differential refresh
+        // against the prestaged previous frame; leaving the view is a view
+        // change, which still forces the cleaning full refresh.
         request.selection = 1;
+        assert_eq!(planner.mode_for(request), RefreshMode::Fast);
+        planner.record_render(request, RefreshMode::Fast);
+
+        request.view = AppView::Home;
         assert_eq!(planner.mode_for(request), RefreshMode::Full);
     }
 
