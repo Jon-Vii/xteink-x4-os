@@ -60,11 +60,13 @@ use esp_hal::analog::adc::{Adc, AdcCalCurve, AdcConfig, Attenuation};
 use esp_hal::dma::{Dma, DmaPriority};
 use esp_hal::entry;
 use esp_hal::gpio::{Input, Io, Level, Output, Pull};
+use esp_hal::interrupt::software::SoftwareInterruptControl;
+use esp_hal::interrupt::Priority;
 use esp_hal::peripherals::ADC1;
 use esp_hal::prelude::*;
 use esp_hal::spi::master::Spi;
 use esp_hal::timer::{timg::TimerGroup, AnyTimer};
-use esp_hal_embassy::Executor;
+use esp_hal_embassy::{Executor, InterruptExecutor};
 use static_cell::StaticCell;
 use tasks::input::InputPins;
 
@@ -96,6 +98,7 @@ fn panic(info: &core::panic::PanicInfo) -> ! {
 }
 
 static EXECUTOR: StaticCell<Executor> = StaticCell::new();
+static INPUT_EXECUTOR: StaticCell<InterruptExecutor<0>> = StaticCell::new();
 
 #[entry]
 fn main() -> ! {
@@ -138,22 +141,30 @@ fn main() -> ! {
         .with_buffers(dma_rx, dma_tx);
     let epd_bus = hal_ext::spi_dma::EpdBus::new(epd_spi, epd_cs, epd_dc, epd_busy, epd_rst);
 
+    // Input polls from an interrupt-priority executor so button sampling
+    // keeps running while the thread executor blocks on SD/EPUB work; a
+    // cold cache build no longer deafens the buttons. Channels between the
+    // tasks already use CriticalSectionRawMutex, so handoff is unchanged.
+    let sw_ints = SoftwareInterruptControl::new(peripherals.SW_INTERRUPT);
+    let input_executor = INPUT_EXECUTOR.init(InterruptExecutor::new(sw_ints.software_interrupt0));
+    let input_spawner = input_executor.start(Priority::Priority1);
+    esp_println::println!("main: spawn input");
+    input_spawner
+        .spawn(tasks::input::run(
+            adc1,
+            InputPins {
+                power: power_button,
+                aux_pin: aux_adc,
+                nav_pin: nav_adc,
+                page_pin: page_adc,
+            },
+        ))
+        .unwrap();
+
     let executor = EXECUTOR.init(Executor::new());
     executor.run(|spawner: Spawner| {
         esp_println::println!("main: spawn display");
         spawner.spawn(tasks::display::run(epd_bus, sd_cs)).unwrap();
-        esp_println::println!("main: spawn input");
-        spawner
-            .spawn(tasks::input::run(
-                adc1,
-                InputPins {
-                    power: power_button,
-                    aux_pin: aux_adc,
-                    nav_pin: nav_adc,
-                    page_pin: page_adc,
-                },
-            ))
-            .unwrap();
         let _lpwr = peripherals.LPWR;
         let _wifi = peripherals.WIFI;
         esp_println::println!("main: spawn app");
