@@ -20,7 +20,7 @@ pub(crate) fn render(fb: &mut Framebuffer, request: RenderRequest, sd_library: &
     if request.view == AppView::Reading && ReaderSource::from_book_id(request.book_id).is_sd() {
         fb.clear(true);
         draw_sd_reader_page(fb, request, sd_library);
-        mirror_framebuffer_long_axis(fb);
+        fb.flip_vertical();
     } else {
         let mut library_entries = [""; MAX_LIBRARY_BOOKS];
         let mut chapters = [UiTocItem {
@@ -382,18 +382,6 @@ fn draw_input_sample(fb: &mut Framebuffer, request: RenderRequest) {
     stroke_rect(fb, Rect::new(488, 104, 220, 64), false);
     draw_ascii(fb, "LAST", 504, 120, false);
     draw_ascii(fb, button_label(request.last_button), 552, 120, false);
-}
-
-fn mirror_framebuffer_long_axis(fb: &mut Framebuffer) {
-    for y in 0..display::HEIGHT / 2 {
-        let other_y = display::HEIGHT - 1 - y;
-        for x in 0..display::WIDTH {
-            let top = fb.pixel(x, y);
-            let bottom = fb.pixel(x, other_y);
-            fb.set_pixel(x, y, bottom);
-            fb.set_pixel(x, other_y, top);
-        }
-    }
 }
 
 fn button_label(button: Option<crate::Button>) -> &'static str {
