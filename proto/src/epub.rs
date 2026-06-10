@@ -1,5 +1,5 @@
 use crate::book::{BookId, BookMeta, BookSource, ChapterMeta, CoverStatus};
-use crate::text::{FontStyle, TextAlign, TextBlock, TextRole, TextRun};
+use crate::text::{FontStyle, TextAlign, TextBlock, TextRole};
 use heapless::Vec;
 use miniz_oxide::inflate::decompress_slice_iter_to_slice;
 use miniz_oxide::inflate::stream::{inflate, InflateState};
@@ -1564,13 +1564,6 @@ pub fn parse_opf<'a>(
     })
 }
 
-pub fn xhtml_text_runs<'a>(
-    xhtml: &'a str,
-    output: &mut Vec<TextRun<'a>, 256>,
-) -> Result<(), XhtmlError> {
-    xhtml_text_runs_with_css(xhtml, None, output)
-}
-
 fn collect_fallback_spine_items<'a>(
     opf_xml: &'a str,
     spine: &mut Vec<SpineItem<'a>, MAX_SPINE_ITEMS>,
@@ -1665,122 +1658,6 @@ fn manifest_item_needed(
         || id == "cover"
         || href.contains("cover")
         || href.ends_with(".ncx")
-}
-
-pub fn xhtml_text_runs_with_css<'a>(
-    xhtml: &'a str,
-    css: Option<&CssRules>,
-    output: &mut Vec<TextRun<'a>, 256>,
-) -> Result<(), XhtmlError> {
-    output.clear();
-    let mut cursor = XmlCursor::new(xhtml);
-    let mut role = TextRole::Body;
-    let mut align = TextAlign::Justify;
-    let mut bold_depth = 0u8;
-    let mut italic_depth = 0u8;
-    let body_required = xhtml.contains("<body") || xhtml.contains(":body");
-    let mut in_body = !body_required;
-    let mut skip_depth = 0u8;
-    let mut skip_tag: Option<&str> = None;
-    while let Some(token) = cursor.next_token() {
-        match token {
-            Token::Start(tag) if tag_name_is(tag, "body") => {
-                in_body = true;
-            }
-            Token::End(tag) if tag_name_is(tag, "body") => {
-                in_body = false;
-            }
-            Token::Start(tag)
-                if skip_depth == 0
-                    && (tag_name_is(tag, "head")
-                        || tag_name_is(tag, "style")
-                        || tag_name_is(tag, "script")
-                        || tag_name_is(tag, "svg")
-                        || tag_name_is(tag, "nav")
-                        || tag_is_hidden(tag)) =>
-            {
-                skip_tag = tag_local_name(tag);
-                skip_depth = skip_depth.saturating_add(1);
-            }
-            Token::End(tag) if skip_tag.map(|name| tag_name_is(tag, name)).unwrap_or(false) => {
-                skip_depth = skip_depth.saturating_sub(1);
-                if skip_depth == 0 {
-                    skip_tag = None;
-                }
-            }
-            _ if !in_body || skip_depth > 0 => {}
-            Token::Start(tag) if tag_name_is(tag, "br") => {
-                push_break_run(output);
-            }
-            Token::Start(tag) if tag_starts_block(tag) => {
-                push_break_run(output);
-                align = block_align_for_tag(tag, css).unwrap_or(TextAlign::Justify);
-                if tag_name_is(tag, "li") {
-                    push_text_run("- ", role, bold_depth, italic_depth, align, output);
-                }
-            }
-            Token::Start(tag) if tag_name_is(tag, "h1") => {
-                push_break_run(output);
-                role = TextRole::Heading1;
-                align = TextAlign::Center;
-                bold_depth = bold_depth.saturating_add(1);
-            }
-            Token::Start(tag) if tag_name_is(tag, "h2") => {
-                push_break_run(output);
-                role = TextRole::Heading2;
-                align = TextAlign::Center;
-                bold_depth = bold_depth.saturating_add(1);
-            }
-            Token::Start(tag) if tag_name_is(tag, "h3") => {
-                push_break_run(output);
-                role = TextRole::Heading3;
-                align = TextAlign::Center;
-                bold_depth = bold_depth.saturating_add(1);
-            }
-            Token::Start(tag) if tag_name_is(tag, "blockquote") => {
-                push_break_run(output);
-                role = TextRole::BlockQuote;
-                align = block_align_for_tag(tag, css).unwrap_or(TextAlign::Left);
-                italic_depth = italic_depth.saturating_add(1);
-            }
-            Token::Start(tag) if tag_name_is(tag, "strong") || tag_name_is(tag, "b") => {
-                bold_depth = bold_depth.saturating_add(1);
-            }
-            Token::Start(tag) if tag_name_is(tag, "em") || tag_name_is(tag, "i") => {
-                italic_depth = italic_depth.saturating_add(1);
-            }
-            Token::End(tag)
-                if tag_name_is(tag, "h1") || tag_name_is(tag, "h2") || tag_name_is(tag, "h3") =>
-            {
-                role = TextRole::Body;
-                bold_depth = bold_depth.saturating_sub(1);
-                push_break_run(output);
-                align = TextAlign::Justify;
-            }
-            Token::End(tag) if tag_name_is(tag, "blockquote") => {
-                role = TextRole::Body;
-                italic_depth = italic_depth.saturating_sub(1);
-                push_break_run(output);
-                align = TextAlign::Justify;
-            }
-            Token::End(tag) if tag_name_is(tag, "strong") || tag_name_is(tag, "b") => {
-                bold_depth = bold_depth.saturating_sub(1);
-            }
-            Token::End(tag) if tag_name_is(tag, "em") || tag_name_is(tag, "i") => {
-                italic_depth = italic_depth.saturating_sub(1);
-            }
-            Token::End(tag) if tag_ends_block(tag) => {
-                push_break_run(output);
-                align = TextAlign::Justify;
-            }
-            Token::Text(text) => {
-                push_text_run(text, role, bold_depth, italic_depth, align, output);
-            }
-            _ => {}
-        }
-    }
-
-    Ok(())
 }
 
 pub fn xhtml_text_blocks_with_css<const BLOCK_LEN: usize, const BLOCKS: usize>(
@@ -2943,32 +2820,6 @@ fn tag_ends_block(tag: &str) -> bool {
         || tag_name_is(tag, "tr")
 }
 
-fn push_text_run<'a>(
-    text: &'a str,
-    role: TextRole,
-    bold_depth: u8,
-    italic_depth: u8,
-    align: TextAlign,
-    output: &mut Vec<TextRun<'a>, 256>,
-) {
-    if text.trim().is_empty() {
-        return;
-    }
-    let _ = output.push(TextRun::aligned(
-        text,
-        role,
-        style_for(bold_depth, italic_depth),
-        align,
-    ));
-}
-
-fn push_break_run<'a>(output: &mut Vec<TextRun<'a>, 256>) {
-    if output.last().map(|run| run.text == "\n").unwrap_or(true) {
-        return;
-    }
-    let _ = output.push(TextRun::new("\n", TextRole::Body, FontStyle::Regular));
-}
-
 fn append_owned_text<const N: usize>(out: &mut heapless::String<N>, text: &str) {
     let mut previous_space = out
         .as_str()
@@ -3606,49 +3457,81 @@ mod tests {
         assert_eq!(package.spine[0].href, "text/ch1.xhtml");
     }
 
-    #[test]
-    fn xhtml_emits_styled_runs() {
-        let xhtml = "<body><h1>Chapter</h1><p>Hello <em>soft</em> <strong>bold</strong></p></body>";
-        let mut runs = heapless::Vec::<TextRun<'_>, 256>::new();
+    struct RecordingSink {
+        fragments: StdVec<(std::string::String, TextRole, FontStyle, TextAlign, bool)>,
+    }
 
-        xhtml_text_runs(xhtml, &mut runs).expect("runs fit");
-        let visible = visible_runs(&runs);
-
-        assert_eq!(
-            visible[0],
-            TextRun::aligned(
-                "Chapter",
-                TextRole::Heading1,
-                FontStyle::Bold,
-                TextAlign::Center
-            )
-        );
-        assert_eq!(
-            visible[1],
-            TextRun::aligned(
-                "Hello ",
-                TextRole::Body,
-                FontStyle::Regular,
-                TextAlign::Justify
-            )
-        );
-        assert_eq!(
-            visible[2],
-            TextRun::aligned(
-                "soft",
-                TextRole::Body,
-                FontStyle::Italic,
-                TextAlign::Justify
-            )
-        );
-        assert_eq!(
-            visible[3],
-            TextRun::aligned("bold", TextRole::Body, FontStyle::Bold, TextAlign::Justify)
-        );
+    impl XhtmlBlockSink for RecordingSink {
+        fn push_block(
+            &mut self,
+            text: &str,
+            role: TextRole,
+            style: FontStyle,
+            align: TextAlign,
+            paragraph_end: bool,
+        ) -> Result<(), XhtmlError> {
+            if !text.is_empty() {
+                self.fragments
+                    .push((text.into(), role, style, align, paragraph_end));
+            }
+            Ok(())
+        }
     }
 
     #[test]
-    fn xhtml_skips_head_style_and_script_text() {
+    fn xhtml_sink_emits_styled_fragments() {
+        let xhtml = "<body><h1>Chapter</h1><p>Hello <em>soft</em> <strong>bold</strong></p></body>";
+        let mut sink = RecordingSink {
+            fragments: StdVec::new(),
+        };
+
+        xhtml_blocks_to_sink(xhtml, None, &mut sink).expect("xhtml parses");
+
+        assert_eq!(
+            sink.fragments[0],
+            (
+                "Chapter".into(),
+                TextRole::Heading1,
+                FontStyle::Bold,
+                TextAlign::Center,
+                true
+            )
+        );
+        assert_eq!(
+            sink.fragments[1],
+            (
+                "Hello ".into(),
+                TextRole::Body,
+                FontStyle::Regular,
+                TextAlign::Justify,
+                false
+            )
+        );
+        assert_eq!(
+            sink.fragments[2],
+            (
+                "soft".into(),
+                TextRole::Body,
+                FontStyle::Italic,
+                TextAlign::Justify,
+                false
+            )
+        );
+        assert_eq!(
+            sink.fragments[3],
+            (
+                "bold".into(),
+                TextRole::Body,
+                FontStyle::Bold,
+                TextAlign::Justify,
+                false
+            )
+        );
+        assert_eq!(sink.fragments.len(), 4);
+    }
+
+    #[test]
+    fn xhtml_blocks_skip_head_style_and_script_text() {
         let xhtml = r#"
             <html>
               <head>
@@ -3659,25 +3542,18 @@ mod tests {
               <body><p>Actual chapter text.</p></body>
             </html>
         "#;
-        let mut runs = heapless::Vec::<TextRun<'_>, 256>::new();
+        let mut blocks = heapless::Vec::<TextBlock<64>, 8>::new();
 
-        xhtml_text_runs(xhtml, &mut runs).expect("runs fit");
-        let visible = visible_runs(&runs);
+        xhtml_text_blocks_with_css(xhtml, None, &mut blocks).expect("blocks fit");
 
-        assert_eq!(visible.len(), 1);
-        assert_eq!(
-            visible[0],
-            TextRun::aligned(
-                "Actual chapter text.",
-                TextRole::Body,
-                FontStyle::Regular,
-                TextAlign::Justify
-            )
-        );
+        assert_eq!(blocks.len(), 1);
+        assert_eq!(blocks[0].text, "Actual chapter text.");
+        assert_eq!(blocks[0].role, TextRole::Body);
+        assert_eq!(blocks[0].align, TextAlign::Justify);
     }
 
     #[test]
-    fn xhtml_skips_nav_and_hidden_content() {
+    fn xhtml_blocks_skip_nav_and_hidden_content() {
         let xhtml = r#"
             <html>
               <body>
@@ -3687,49 +3563,39 @@ mod tests {
               </body>
             </html>
         "#;
-        let mut runs = heapless::Vec::<TextRun<'_>, 256>::new();
+        let mut blocks = heapless::Vec::<TextBlock<64>, 8>::new();
 
-        xhtml_text_runs(xhtml, &mut runs).expect("runs fit");
-        let visible = visible_runs(&runs);
+        xhtml_text_blocks_with_css(xhtml, None, &mut blocks).expect("blocks fit");
 
-        assert_eq!(visible.len(), 1);
-        assert_eq!(
-            visible[0],
-            TextRun::aligned(
-                "Visible text",
-                TextRole::Body,
-                FontStyle::Regular,
-                TextAlign::Justify
-            )
-        );
+        assert_eq!(blocks.len(), 1);
+        assert_eq!(blocks[0].text, "Visible text");
     }
 
     #[test]
-    fn xhtml_emits_breaks_between_list_items() {
+    fn xhtml_blocks_number_ordered_list_items() {
         let xhtml = "<body><ol><li>One</li><li>Two</li></ol></body>";
-        let mut runs = heapless::Vec::<TextRun<'_>, 256>::new();
+        let mut blocks = heapless::Vec::<TextBlock<64>, 8>::new();
 
-        xhtml_text_runs(xhtml, &mut runs).expect("runs fit");
+        xhtml_text_blocks_with_css(xhtml, None, &mut blocks).expect("blocks fit");
 
-        assert!(runs.iter().any(|run| run.text == "\n"));
-        let visible = visible_runs(&runs);
-        assert_eq!(visible[0].text, "- ");
-        assert_eq!(visible[1].text, "One");
-        assert_eq!(visible[2].text, "- ");
-        assert_eq!(visible[3].text, "Two");
+        assert_eq!(blocks.len(), 2);
+        assert_eq!(blocks[0].text, "1. One");
+        assert_eq!(blocks[1].text, "2. Two");
     }
 
     #[test]
-    fn xhtml_marks_center_aligned_blocks() {
+    fn xhtml_blocks_mark_center_aligned_blocks() {
         let xhtml =
             r#"<body><p class="center">Title</p><p style="text-align: center">Author</p></body>"#;
-        let mut runs = heapless::Vec::<TextRun<'_>, 256>::new();
+        let mut blocks = heapless::Vec::<TextBlock<64>, 8>::new();
 
-        xhtml_text_runs(xhtml, &mut runs).expect("runs fit");
-        let visible = visible_runs(&runs);
+        xhtml_text_blocks_with_css(xhtml, None, &mut blocks).expect("blocks fit");
 
-        assert_eq!(visible[0].align, TextAlign::Center);
-        assert_eq!(visible[1].align, TextAlign::Center);
+        assert_eq!(blocks.len(), 2);
+        assert_eq!(blocks[0].text, "Title");
+        assert_eq!(blocks[0].align, TextAlign::Center);
+        assert_eq!(blocks[1].text, "Author");
+        assert_eq!(blocks[1].align, TextAlign::Center);
     }
 
     #[test]
@@ -4227,13 +4093,6 @@ mod tests {
 
         assert_eq!(blocks.len(), 1);
         assert_eq!(blocks[0].text, "Space, and a fourth, Time.");
-    }
-
-    fn visible_runs<'a>(runs: &'a [TextRun<'a>]) -> heapless::Vec<TextRun<'a>, 256> {
-        runs.iter()
-            .copied()
-            .filter(|run| run.text != "\n")
-            .collect()
     }
 
     #[test]
