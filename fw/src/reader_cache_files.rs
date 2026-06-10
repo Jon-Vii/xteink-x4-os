@@ -13,7 +13,7 @@ use proto::cache::{
     encode_toc, section_file_name, BookV2Header, BookV2SectionRecord, SectionV2Header,
     BLOCK_RECORD_BYTES, BOOK_V2_HEADER_BYTES, BOOK_V2_SECTION_RECORD_BYTES, CACHE_BOOK_FILE,
     CACHE_COVER_FILE, CACHE_DIR, CACHE_ROOT_DIR, CACHE_SECTIONS_DIR, CACHE_SECTION_FILE_BYTES,
-    CACHE_STATE_FILE, CACHE_V2_DIR, COVER_BYTES, COVER_HEADER_BYTES, PAGE_RECORD_BYTES,
+    CACHE_STATE_FILE, CACHE_V2_DIR, COVER_HEADER_BYTES, PAGE_RECORD_BYTES,
     SECTION_HEADER_BYTES, SECTION_V2_HEADER_BYTES, TOC_RECORD_BYTES,
 };
 
@@ -113,11 +113,13 @@ where
         let Ok(header) = decode_cover_header(&header_bytes) else {
             return CoverLoadResult::Invalid;
         };
-        let mut bits = [0u8; COVER_BYTES];
-        if read_exact_file(file, &mut bits).is_err() {
+        // Read straight into the store's cover buffer: a stack copy here is
+        // an ~8 KB frame on a path that already runs near the stack floor.
+        if read_exact_file(file, library.cover_bits_mut()).is_err() {
+            library.clear_cover();
             return CoverLoadResult::Invalid;
         }
-        library.set_cover_bits(header.width, header.height, &bits);
+        library.finish_cover_load(header.width, header.height);
         CoverLoadResult::Hit
     })
     .unwrap_or(CoverLoadResult::Miss)

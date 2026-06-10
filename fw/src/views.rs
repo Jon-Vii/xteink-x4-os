@@ -116,9 +116,10 @@ fn fill_chapters<'a>(
             .chapter_count_for_ui()
             .max(1)
             .min(chapters.len() as u8) as usize;
-        for (index, item) in chapters.iter_mut().take(count).enumerate() {
+        for item in chapters.iter_mut().take(count) {
+            // Empty titles render as numbered chapters in the chapters view.
             *item = UiTocItem {
-                title: fallback_chapter_title(index),
+                title: "",
                 level: 1,
             };
         }
@@ -135,36 +136,6 @@ fn fill_chapters<'a>(
         }
     }
     count
-}
-
-fn fallback_chapter_title(index: usize) -> &'static str {
-    const TITLES: [&str; 24] = [
-        "Chapter 1",
-        "Chapter 2",
-        "Chapter 3",
-        "Chapter 4",
-        "Chapter 5",
-        "Chapter 6",
-        "Chapter 7",
-        "Chapter 8",
-        "Chapter 9",
-        "Chapter 10",
-        "Chapter 11",
-        "Chapter 12",
-        "Chapter 13",
-        "Chapter 14",
-        "Chapter 15",
-        "Chapter 16",
-        "Chapter 17",
-        "Chapter 18",
-        "Chapter 19",
-        "Chapter 20",
-        "Chapter 21",
-        "Chapter 22",
-        "Chapter 23",
-        "Chapter 24",
-    ];
-    TITLES.get(index).copied().unwrap_or("Chapter")
 }
 
 fn ui_library_status(status: LibraryScanStatus) -> UiLibraryStatus {
@@ -308,11 +279,7 @@ fn draw_reader_footer(
     draw_text(fb, label_font, label.as_str(), label_x, footer_y, false);
 }
 
-fn draw_sd_reader_loading(
-    fb: &mut Framebuffer,
-    request: RenderRequest,
-    sd_library: &ReaderStore,
-) {
+fn draw_sd_reader_loading(fb: &mut Framebuffer, request: RenderRequest, sd_library: &ReaderStore) {
     let title_font = literata(FontStyle::Bold);
     let author_font = literata(FontStyle::Italic);
     let fallback = catalog::active_book(request.book_id);
@@ -342,11 +309,7 @@ fn draw_sd_reader_loading(
     }
 }
 
-fn draw_sd_reader_error(
-    fb: &mut Framebuffer,
-    request: RenderRequest,
-    sd_library: &ReaderStore,
-) {
+fn draw_sd_reader_error(fb: &mut Framebuffer, request: RenderRequest, sd_library: &ReaderStore) {
     let title_font = literata(FontStyle::Bold);
     let body_font = literata(FontStyle::Regular);
     let fallback = catalog::active_book(request.book_id);

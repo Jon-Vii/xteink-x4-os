@@ -174,7 +174,7 @@ fn render_chapters_landscape(fb: &mut Framebuffer, shell: &UiShell<'_>) {
         .skip(first)
         .take(visible_count)
     {
-        draw_literata_toc_item(fb, body_font, item, index == selected, baseline_y);
+        draw_literata_toc_item(fb, body_font, item, index, index == selected, baseline_y);
         baseline_y += 34;
     }
     let mut counter = [0u8; 32];
@@ -188,6 +188,7 @@ fn draw_literata_toc_item(
     fb: &mut Framebuffer,
     font: &BitmapFont,
     item: &UiTocItem<'_>,
+    index: usize,
     selected: bool,
     baseline_y: i16,
 ) {
@@ -198,15 +199,30 @@ fn draw_literata_toc_item(
     if selected {
         draw_text(fb, font, ">", 60, baseline_y, true);
     }
+    // Untitled entries (no TOC in the book, or budget-truncated records) are
+    // presented by position so every chapter stays reachable and labeled.
+    let mut numbered = [0u8; 32];
+    let title = if item.title.is_empty() {
+        fmt_numbered_chapter(index + 1, &mut numbered)
+    } else {
+        item.title
+    };
     draw_text_truncated(
         fb,
         font,
-        item.title,
+        title,
         (indent + 34) as i16,
         baseline_y,
         650usize.saturating_sub(indent as usize),
         selected,
     );
+}
+
+fn fmt_numbered_chapter(number: usize, buf: &mut [u8; 32]) -> &str {
+    let mut cursor = 0;
+    push_str(buf, &mut cursor, "Chapter ");
+    push_usize(buf, &mut cursor, number);
+    core::str::from_utf8(&buf[..cursor]).unwrap_or("Chapter")
 }
 
 fn draw_dock_clean_rail(fb: &mut Framebuffer, x: u16, y: u16, w: u16, h: u16) {

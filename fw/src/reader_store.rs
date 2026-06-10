@@ -11,7 +11,10 @@ pub(crate) const MAX_LIBRARY_BOOKS: usize = 16;
 pub(crate) const MAX_SD_TOC_ITEMS: usize = 128;
 pub(crate) const MAX_BOOK_SECTIONS: usize = 160;
 const MAX_PUBLISHED_CHAPTER_EVENTS: usize = MAX_SD_CHAPTERS;
-pub(crate) const MAX_SD_TOC_TEXT_BYTES: usize = 8192;
+// Titles only (hrefs/anchors are no longer stored), so 4 KB covers the full
+// 128-item TOC at ~32 bytes per title and the saved RAM widens the stack
+// region, which the EPUB open path runs close to.
+pub(crate) const MAX_SD_TOC_TEXT_BYTES: usize = 4096;
 pub(crate) const MAX_READER_BLOCKS: usize = 384;
 pub(crate) const MAX_READER_PAGES: usize = 96;
 pub(crate) const MAX_READER_TEXT_BYTES: usize = 16_384;
@@ -256,10 +259,17 @@ impl ReaderStore {
         self.cover_bits.fill(0);
     }
 
-    pub(crate) fn set_cover_bits(&mut self, width: u16, height: u16, bits: &[u8; COVER_BYTES]) {
+    /// Expose the cover buffer for direct file reads. The cover is marked
+    /// not-ready until [`Self::finish_cover_load`] validates it, so a failed
+    /// read can never leave a half-written cover visible.
+    pub(crate) fn cover_bits_mut(&mut self) -> &mut [u8; COVER_BYTES] {
+        self.cover_ready = false;
+        &mut self.cover_bits
+    }
+
+    pub(crate) fn finish_cover_load(&mut self, width: u16, height: u16) {
         self.cover_width = width;
         self.cover_height = height;
-        self.cover_bits.copy_from_slice(bits);
         self.cover_ready = true;
     }
 
@@ -525,38 +535,26 @@ impl ReaderStore {
         })
     }
 
-    pub(crate) fn push_toc_record(
-        &mut self,
-        title: &str,
-        href: &str,
-        level: u8,
-        spine_index: i16,
-    ) -> bool {
+    pub(crate) fn push_toc_record(&mut self, title: &str, level: u8, spine_index: i16) -> bool {
         if self.toc_count >= self.toc.len() {
             return false;
         }
-        let (href_without_anchor, anchor) = href.split_once('#').unwrap_or((href, ""));
         let title_offset = self.toc_text_len;
         if !self.append_toc_text(title) {
             return false;
         }
-        let href_offset = self.toc_text_len;
-        if !self.append_toc_text(href_without_anchor) {
-            self.toc_text_len = title_offset;
-            return false;
-        }
-        let anchor_offset = self.toc_text_len;
-        if !self.append_toc_text(anchor) {
-            self.toc_text_len = title_offset;
-            return false;
-        }
+        // The spine target is resolved before push and carried by the record,
+        // so href/anchor text is never read back. The whole toc_text budget
+        // goes to titles; records keep empty href/anchor ranges so the cache
+        // format stays unchanged.
+        let empty_offset = self.toc_text_len as u32;
         self.toc[self.toc_count] = TocRecord {
             title_offset: title_offset as u32,
             title_len: title.len().min(u16::MAX as usize) as u16,
-            href_offset: href_offset as u32,
-            href_len: href_without_anchor.len().min(u16::MAX as usize) as u16,
-            anchor_offset: anchor_offset as u32,
-            anchor_len: anchor.len().min(u16::MAX as usize) as u16,
+            href_offset: empty_offset,
+            href_len: 0,
+            anchor_offset: empty_offset,
+            anchor_len: 0,
             level,
             spine_index,
         };

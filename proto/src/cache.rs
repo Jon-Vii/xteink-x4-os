@@ -3,8 +3,8 @@ use heapless::String;
 
 pub const CACHE_MAGIC: u32 = 0x5834_5244; // X4RD
 pub const CACHE_VERSION: u16 = 1;
-pub const CACHE_V2_VERSION: u16 = 11;
-const CACHE_V2_COMPAT_VERSION: u16 = 12;
+pub const CACHE_V2_VERSION: u16 = 21;
+const CACHE_V2_COMPAT_VERSION: u16 = 22;
 pub const CACHE_ROOT_DIR: &str = "XTEINK";
 pub const CACHE_DIR: &str = "CACHE";
 pub const CACHE_V2_DIR: &str = "CACHE2";

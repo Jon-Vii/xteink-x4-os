@@ -16,15 +16,18 @@ use heapless::String;
 use proto::book::BookId;
 use proto::cache::BookV2SectionRecord;
 use proto::epub::{
-    parse_opf, xhtml_blocks_to_sink, ByteStream, CssRules, Epub3NavStreamParser, EpubTocSink,
-    NcxStreamParser, OwnedZipEntry, ReadAt, StreamingXmlTokenizer, TocError, XhtmlBlockSink,
-    XhtmlError, ZipInflateScratch, ZipLocalStream, ZipStream, MAX_ENTRY_NAME_BYTES,
+    decode_html_entity, parse_opf, strip_fragment, xhtml_blocks_to_sink, CssRules,
+    Epub3NavStreamParser, EpubTocSink, EpubZipOps, NcxStreamParser, ReadAt, StreamingXmlTokenizer,
+    TocError, XhtmlBlockSink, XhtmlError, ZipInflateScratch, ZipStream, MAX_ENTRY_NAME_BYTES,
 };
 use proto::text::{TextAlign, TextRole};
 
 pub(crate) const READER_TAIL_SCRATCH: usize = 4096;
 pub(crate) const READER_HEADER_SCRATCH: usize = 46;
-pub(crate) const READER_COMPRESSED_SCRATCH: usize = 16_384;
+// All zip reads stream through the shared inflate engine in bounded chunks,
+// so this only sets the fetch granularity; SD transfers are 2 KB ops either
+// way. Kept small so the freed static RAM widens the stack region.
+pub(crate) const READER_COMPRESSED_SCRATCH: usize = 8192;
 pub(crate) const READER_CONTAINER_SCRATCH: usize = 4096;
 pub(crate) const READER_OPF_SCRATCH: usize = 16_384;
 pub(crate) const READER_XHTML_SCRATCH: usize = 24_576;
@@ -54,10 +57,14 @@ struct TocScratch<'a> {
 struct LibraryTocSink<'a, 'p> {
     library: &'a mut ReaderStore,
     package: &'p proto::epub::EpubPackage<'p>,
+    truncated: bool,
 }
 
 impl EpubTocSink for LibraryTocSink<'_, '_> {
     fn push_toc(&mut self, title: &str, href: &str, level: u8) -> Result<(), TocError> {
+        if self.truncated {
+            return Ok(());
+        }
         let spine_index = self
             .package
             .spine
@@ -65,13 +72,13 @@ impl EpubTocSink for LibraryTocSink<'_, '_> {
             .position(|item| href_matches_spine(href, item.href))
             .map(|index| index as i16)
             .unwrap_or(-1);
-        if self
-            .library
-            .push_toc_record(title, href, level, spine_index)
-        {
+        if self.library.push_toc_record(title, level, spine_index) {
             Ok(())
         } else {
-            Err(TocError::TooManyItems)
+            // Out of TOC item or text budget: keep the chapters that fit
+            // instead of failing the whole parse.
+            self.truncated = true;
+            Ok(())
         }
     }
 }
@@ -101,6 +108,9 @@ impl<'a> ReaderCacheScratch<'a> {
     }
 }
 
+/// Kept out of line: the storage dispatcher's frame must stay small, and the
+/// EPUB open path below already runs close to the 30 KB stack region.
+#[inline(never)]
 pub(crate) fn build_or_load_book_cache(
     epd: &mut Epd,
     sd_cs: &mut Output<'static>,
@@ -143,6 +153,7 @@ pub(crate) fn build_or_load_book_cache(
     library.finish_book_load(index, requested_chapter, status);
 }
 
+#[inline(never)]
 pub(crate) fn build_or_load_book_cache_from_root<
     D,
     T,
@@ -243,12 +254,14 @@ where
     }
 }
 
+#[inline(never)]
 pub(crate) fn store_app_state(epd: &mut Epd, sd_cs: &mut Output<'static>, record: AppStateRecord) {
     let _ = sd_session::with_root(epd, sd_cs, |root| {
         reader_cache_files::write_state_file(root, record)
     });
 }
 
+#[inline(never)]
 fn try_load_v2_book_cache<
     D,
     T,
@@ -390,170 +403,7 @@ impl From<proto::epub::XhtmlError> for ReaderCacheError {
     }
 }
 
-trait EpubZipOps {
-    fn is_forward_only(&self) -> bool {
-        false
-    }
-
-    fn find_entry(
-        &mut self,
-        name: &str,
-        header_scratch: &mut [u8; 46],
-        name_scratch: &mut [u8],
-    ) -> Result<OwnedZipEntry, proto::epub::ZipError>;
-
-    fn read_entry_streamed(
-        &mut self,
-        entry: OwnedZipEntry,
-        compressed_scratch: &mut [u8],
-        output: &mut [u8],
-        inflate_scratch: &mut ZipInflateScratch,
-    ) -> Result<usize, proto::epub::ZipError>;
-
-    fn read_entry_prefix_streamed(
-        &mut self,
-        entry: OwnedZipEntry,
-        compressed_scratch: &mut [u8],
-        output: &mut [u8],
-        inflate_scratch: &mut ZipInflateScratch,
-    ) -> Result<(usize, bool), proto::epub::ZipError>;
-
-    fn read_entry_to_sink(
-        &mut self,
-        entry: OwnedZipEntry,
-        compressed_scratch: &mut [u8],
-        output_window: &mut [u8],
-        inflate_scratch: &mut ZipInflateScratch,
-        emit: &mut dyn FnMut(&[u8]) -> Result<(), proto::epub::ZipError>,
-    ) -> Result<(), proto::epub::ZipError>;
-}
-
-impl<R> EpubZipOps for ZipStream<'_, R>
-where
-    R: ReadAt,
-{
-    fn find_entry(
-        &mut self,
-        name: &str,
-        header_scratch: &mut [u8; 46],
-        name_scratch: &mut [u8],
-    ) -> Result<OwnedZipEntry, proto::epub::ZipError> {
-        ZipStream::find_entry(self, name, header_scratch, name_scratch)
-    }
-
-    fn read_entry_streamed(
-        &mut self,
-        entry: OwnedZipEntry,
-        compressed_scratch: &mut [u8],
-        output: &mut [u8],
-        inflate_scratch: &mut ZipInflateScratch,
-    ) -> Result<usize, proto::epub::ZipError> {
-        ZipStream::read_entry_streamed(self, entry, compressed_scratch, output, inflate_scratch)
-    }
-
-    fn read_entry_prefix_streamed(
-        &mut self,
-        entry: OwnedZipEntry,
-        compressed_scratch: &mut [u8],
-        output: &mut [u8],
-        inflate_scratch: &mut ZipInflateScratch,
-    ) -> Result<(usize, bool), proto::epub::ZipError> {
-        ZipStream::read_entry_prefix_streamed(
-            self,
-            entry,
-            compressed_scratch,
-            output,
-            inflate_scratch,
-        )
-    }
-
-    fn read_entry_to_sink(
-        &mut self,
-        entry: OwnedZipEntry,
-        compressed_scratch: &mut [u8],
-        output_window: &mut [u8],
-        inflate_scratch: &mut ZipInflateScratch,
-        emit: &mut dyn FnMut(&[u8]) -> Result<(), proto::epub::ZipError>,
-    ) -> Result<(), proto::epub::ZipError> {
-        ZipStream::read_entry_to_sink(
-            self,
-            entry,
-            compressed_scratch,
-            output_window,
-            inflate_scratch,
-            emit,
-        )
-    }
-}
-
-impl<R> EpubZipOps for ZipLocalStream<R>
-where
-    R: ByteStream,
-{
-    fn is_forward_only(&self) -> bool {
-        true
-    }
-
-    fn find_entry(
-        &mut self,
-        name: &str,
-        header_scratch: &mut [u8; 46],
-        name_scratch: &mut [u8],
-    ) -> Result<OwnedZipEntry, proto::epub::ZipError> {
-        ZipLocalStream::find_entry(self, name, header_scratch, name_scratch)
-    }
-
-    fn read_entry_streamed(
-        &mut self,
-        entry: OwnedZipEntry,
-        compressed_scratch: &mut [u8],
-        output: &mut [u8],
-        inflate_scratch: &mut ZipInflateScratch,
-    ) -> Result<usize, proto::epub::ZipError> {
-        ZipLocalStream::read_entry_streamed(
-            self,
-            entry,
-            compressed_scratch,
-            output,
-            inflate_scratch,
-        )
-    }
-
-    fn read_entry_prefix_streamed(
-        &mut self,
-        entry: OwnedZipEntry,
-        compressed_scratch: &mut [u8],
-        output: &mut [u8],
-        inflate_scratch: &mut ZipInflateScratch,
-    ) -> Result<(usize, bool), proto::epub::ZipError> {
-        ZipLocalStream::read_entry_prefix_streamed(
-            self,
-            entry,
-            compressed_scratch,
-            output,
-            inflate_scratch,
-        )
-    }
-
-    fn read_entry_to_sink(
-        &mut self,
-        entry: OwnedZipEntry,
-        compressed_scratch: &mut [u8],
-        output_window: &mut [u8],
-        inflate_scratch: &mut ZipInflateScratch,
-        emit: &mut dyn FnMut(&[u8]) -> Result<(), proto::epub::ZipError>,
-    ) -> Result<(), proto::epub::ZipError> {
-        ZipLocalStream::read_entry_to_sink(
-            self,
-            entry,
-            compressed_scratch,
-            output_window,
-            inflate_scratch,
-            emit,
-        )
-    }
-}
-
+#[inline(never)]
 fn build_or_load_epub_cache_from_file<
     D,
     T,
@@ -628,6 +478,7 @@ struct ZipBuildScratch<'a> {
     zip_inflate: &'a mut ZipInflateScratch,
 }
 
+#[inline(never)]
 fn build_or_load_epub_cache_from_zip<
     Z,
     D,
@@ -918,8 +769,18 @@ fn load_epub_toc<Z>(
         let Ok(toc_entry) = zip.find_entry(&toc_path, scratch.header, scratch.name) else {
             continue;
         };
+        esp_println::println!(
+            "epub: toc entry {} compressed={} uncompressed={}",
+            toc_path.as_str(),
+            toc_entry.compressed_size,
+            toc_entry.uncompressed_size
+        );
 
-        let mut sink = LibraryTocSink { library, package };
+        let mut sink = LibraryTocSink {
+            library,
+            package,
+            truncated: false,
+        };
         let mut tokenizer = StreamingXmlTokenizer::new();
         let is_ncx = toc_path.as_str().ends_with(".ncx");
         let parse_ok = if is_ncx {
@@ -935,8 +796,7 @@ fn load_epub_toc<Z>(
                         .map_err(|_| proto::epub::ZipError::Inflate)
                 },
             );
-            feed_result.is_ok()
-                && tokenizer.finish_ncx(&mut parser, &mut sink).is_ok()
+            feed_result.is_ok() && tokenizer.finish_ncx(&mut parser, &mut sink).is_ok()
         } else {
             let mut parser = Epub3NavStreamParser::new();
             let feed_result = zip.read_entry_to_sink(
@@ -950,20 +810,22 @@ fn load_epub_toc<Z>(
                         .map_err(|_| proto::epub::ZipError::Inflate)
                 },
             );
-            feed_result.is_ok()
-                && tokenizer.finish_nav(&mut parser, &mut sink).is_ok()
+            feed_result.is_ok() && tokenizer.finish_nav(&mut parser, &mut sink).is_ok()
         };
 
         if parse_ok && sink.library.toc_count() > 0 {
             esp_println::println!(
-                "epub: toc streamed {} item(s) from {}",
+                "epub: toc streamed {} item(s) from {} truncated={}",
                 sink.library.toc_count(),
-                toc_path.as_str()
+                toc_path.as_str(),
+                sink.truncated
             );
             return;
         }
+        esp_println::println!("epub: toc parse failed for {}", toc_path.as_str());
         sink.library.clear_toc();
     }
+    esp_println::println!("epub: toc unavailable, chapters fall back to spine");
 }
 
 fn href_matches_spine(href: &str, spine_href: &str) -> bool {
@@ -972,10 +834,6 @@ fn href_matches_spine(href: &str, spine_href: &str) -> bool {
         || href.ends_with(spine_href)
         || spine_href.ends_with(href)
         || file_name(href) == file_name(spine_href)
-}
-
-fn strip_fragment(value: &str) -> &str {
-    value.split('#').next().unwrap_or(value)
 }
 
 fn file_name(value: &str) -> &str {
@@ -1429,7 +1287,6 @@ fn flush_styled_preview_line<
         if !title.is_empty()
             && sink.library.push_toc_record(
                 title.as_str(),
-                "",
                 heading_toc_level(role),
                 sink.spine_index as i16,
             )
@@ -1530,7 +1387,7 @@ fn push_normalized_decoded<const N: usize>(text: &str, out: &mut String<N>) {
     let mut cursor = 0usize;
     while cursor < text.len() {
         let rest = &text[cursor..];
-        if let Some(decoded) = decode_entity(rest) {
+        if let Some(decoded) = decode_html_entity(rest) {
             if decoded.is_whitespace() {
                 if !previous_space && out.push(' ').is_err() {
                     break;
@@ -1568,55 +1425,6 @@ fn push_normalized_char<const N: usize>(ch: char, out: &mut String<N>) -> Result
         ch if ch as u32 <= u16::MAX as u32 => out.push(ch).map_err(|_| ()),
         _ => out.push('?').map_err(|_| ()),
     }
-}
-
-fn decode_entity(input: &str) -> Option<char> {
-    if let Some(decoded) = decode_numeric_entity(input) {
-        Some(decoded)
-    } else if input.starts_with("&amp;") {
-        Some('&')
-    } else if input.starts_with("&lt;") {
-        Some('<')
-    } else if input.starts_with("&gt;") {
-        Some('>')
-    } else if input.starts_with("&quot;") {
-        Some('"')
-    } else if input.starts_with("&apos;") {
-        Some('\'')
-    } else if input.starts_with("&nbsp;") {
-        Some(' ')
-    } else if input.starts_with("&mdash;") {
-        Some('—')
-    } else if input.starts_with("&ndash;") {
-        Some('–')
-    } else if input.starts_with("&lsquo;") {
-        Some('‘')
-    } else if input.starts_with("&rsquo;") {
-        Some('’')
-    } else if input.starts_with("&ldquo;") {
-        Some('“')
-    } else if input.starts_with("&rdquo;") {
-        Some('”')
-    } else if input.starts_with("&hellip;") {
-        Some('…')
-    } else {
-        None
-    }
-}
-
-fn decode_numeric_entity(input: &str) -> Option<char> {
-    let rest = input.strip_prefix("&#")?;
-    let end = rest.find(';')?;
-    let entity = &rest[..end];
-    let value = if let Some(hex) = entity
-        .strip_prefix('x')
-        .or_else(|| entity.strip_prefix('X'))
-    {
-        u32::from_str_radix(hex, 16).ok()?
-    } else {
-        entity.parse::<u32>().ok()?
-    };
-    char::from_u32(value)
 }
 
 fn is_epub_titlepage_label(text: &str) -> bool {
