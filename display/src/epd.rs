@@ -149,6 +149,19 @@ pub const fn is_byte_aligned(rect: Rect) -> bool {
     rect.x & 7 == 0 && rect.w & 7 == 0 && rect.w > 0 && rect.h > 0 && rect.x < WIDTH as u16
 }
 
+/// Bit-reversal lookup. RV32IMC has no bit-manipulation extension, so
+/// `u8::reverse_bits` lowers to a shift/mask sequence; one rodata load
+/// per byte is cheaper across the 96 K transforms of a full flush.
+static REVERSE_BITS_LUT: [u8; 256] = {
+    let mut lut = [0u8; 256];
+    let mut i = 0;
+    while i < 256 {
+        lut[i] = (i as u8).reverse_bits();
+        i += 1;
+    }
+    lut
+};
+
 pub fn fill_transformed_band(fb: &Framebuffer, band_y: usize, out: &mut [u8; BAND_BYTES]) -> usize {
     let rows = BAND_ROWS.min(HEIGHT - band_y);
     let len = rows * ROW_BYTES;
@@ -158,6 +171,15 @@ pub fn fill_transformed_band(fb: &Framebuffer, band_y: usize, out: &mut [u8; BAN
         return len;
     }
 
+    #[inline(always)]
+    fn panel_byte(value: u8) -> u8 {
+        if MIRROR_X || REVERSE_BITS {
+            REVERSE_BITS_LUT[value as usize]
+        } else {
+            value
+        }
+    }
+
     for out_row in 0..rows {
         let panel_y = band_y + out_row;
         let src_y = if MIRROR_Y {
@@ -165,17 +187,16 @@ pub fn fill_transformed_band(fb: &Framebuffer, band_y: usize, out: &mut [u8; BAN
         } else {
             panel_y
         };
-        for out_byte in 0..ROW_BYTES {
-            let src_byte = if MIRROR_X {
-                ROW_BYTES - 1 - out_byte
-            } else {
-                out_byte
-            };
-            let mut value = fb.band(src_y, 1)[src_byte];
-            if MIRROR_X || REVERSE_BITS {
-                value = value.reverse_bits();
+        let src_row = fb.band(src_y, 1);
+        let dst_row = &mut out[out_row * ROW_BYTES..(out_row + 1) * ROW_BYTES];
+        if MIRROR_X {
+            for (dst, src) in dst_row.iter_mut().zip(src_row.iter().rev()) {
+                *dst = panel_byte(*src);
             }
-            out[out_row * ROW_BYTES + out_byte] = value;
+        } else {
+            for (dst, src) in dst_row.iter_mut().zip(src_row.iter()) {
+                *dst = panel_byte(*src);
+            }
         }
     }
 
