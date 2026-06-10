@@ -272,10 +272,9 @@ string blob for title, author, source path, hrefs, and TOC titles. Section files
 contain a `SectionHeader`, page records, block records, paragraph flags, and the
 UTF-8 text blob for the cached rendered page chunk. The active firmware state
 keeps only loaded book metadata, active section page records, block records,
-text bytes, and small ZIP/XML scratch buffers. Oversized XHTML spine entries are
-decoded as a bounded prefix for the first cache chunk and marked partial, rather
-than failing before page one can be rendered. Full resumable continuation inside
-one huge XHTML member remains the next cache-cursor refinement. `STATE.BIN`
+text bytes, and small ZIP/XML scratch buffers. Spine XHTML members of any size
+stream completely through the resumable block parser in bounded inflate
+windows, so chapter content is never truncated by scratch-buffer limits. `STATE.BIN`
 stores the encoded `AppStateRecord`; version 2 records include the SD source
 size and path-derived hash so boot restore can map saved progress back onto the
 scanned SD catalog instead of trusting a volatile list index.

@@ -16,9 +16,9 @@ use heapless::String;
 use proto::book::BookId;
 use proto::cache::BookV2SectionRecord;
 use proto::epub::{
-    decode_html_entity, parse_opf, strip_fragment, xhtml_blocks_to_sink, CssRules,
-    Epub3NavStreamParser, EpubTocSink, EpubZipOps, NcxStreamParser, ReadAt, StreamingXmlTokenizer,
-    TocError, XhtmlBlockSink, XhtmlError, ZipInflateScratch, ZipStream, MAX_ENTRY_NAME_BYTES,
+    decode_html_entity, parse_opf, strip_fragment, CssRules, Epub3NavStreamParser, EpubTocSink,
+    EpubZipOps, NcxStreamParser, ReadAt, StreamingXmlTokenizer, TocError, XhtmlBlockSink,
+    XhtmlBlockStreamParser, XhtmlError, ZipInflateScratch, ZipStream, MAX_ENTRY_NAME_BYTES,
 };
 use proto::text::{TextAlign, TextRole};
 use ui::reading::StyledInkCursor;
@@ -609,15 +609,6 @@ where
             xhtml_entry.compressed_size,
             xhtml_entry.uncompressed_size
         );
-        let (xhtml_len, xhtml_complete) = zip.read_entry_prefix_streamed(
-            xhtml_entry,
-            scratch.compressed,
-            scratch.xhtml,
-            &mut *scratch.zip_inflate,
-        )?;
-        let xhtml_len = valid_utf8_prefix_len(&scratch.xhtml[..xhtml_len], xhtml_complete)?;
-        let xhtml = core::str::from_utf8(&scratch.xhtml[..xhtml_len])
-            .map_err(|_| ReaderCacheError::Utf8)?;
         let mut sink = LibraryBlockSink {
             library,
             root,
@@ -640,19 +631,59 @@ where
             generate_toc_from_headings,
             generated_toc_for_spine: false,
         };
-        match xhtml_blocks_to_sink(xhtml, Some(&css_rules), &mut sink) {
-            Ok(()) => {}
-            Err(err) if sink.stopped => {
-                esp_println::println!(
-                    "epub: bounded open stopped at spine {} after {} section(s): {:?}",
-                    spine_index,
-                    *sink.section_count,
-                    err
-                );
+        // Stream the whole member through the resumable block parser in
+        // bounded windows: spine XHTML of any size decodes completely, with
+        // no 24 KB prefix truncation. The parser's in-body assumption is
+        // sniffed from the first decoded window, mirroring the
+        // whole-document contains() check.
+        let mut tokenizer = StreamingXmlTokenizer::new();
+        let mut parser: Option<XhtmlBlockStreamParser> = None;
+        let mut parse_error: Option<XhtmlError> = None;
+        let read_result = zip.read_entry_to_sink(
+            xhtml_entry,
+            scratch.compressed,
+            scratch.xhtml,
+            &mut *scratch.zip_inflate,
+            &mut |chunk| {
+                let parser = parser.get_or_insert_with(|| {
+                    let has_body =
+                        bytes_contain(chunk, b"<body") || bytes_contain(chunk, b":body");
+                    XhtmlBlockStreamParser::new(!has_body)
+                });
+                tokenizer
+                    .feed_xhtml_blocks(chunk, parser, Some(&css_rules), &mut sink)
+                    .map_err(|err| {
+                        parse_error = Some(err);
+                        proto::epub::ZipError::Inflate
+                    })
+            },
+        );
+        match read_result {
+            Ok(()) => {
+                if let Some(parser) = parser.as_mut() {
+                    if let Err(err) = tokenizer.finish_xhtml_blocks(parser, &mut sink) {
+                        if !sink.stopped {
+                            return Err(err.into());
+                        }
+                    }
+                }
+            }
+            Err(_) if parse_error.is_some() => {
+                let err = parse_error.take().expect("parse error recorded");
+                if sink.stopped {
+                    esp_println::println!(
+                        "epub: bounded open stopped at spine {} after {} section(s): {:?}",
+                        spine_index,
+                        *sink.section_count,
+                        err
+                    );
+                } else {
+                    return Err(err.into());
+                }
             }
             Err(err) => return Err(err.into()),
         }
-        sink.finish_spine(!xhtml_complete);
+        sink.finish_spine(false);
     }
 
     if section_count > 0 && total_pages > 0 {
@@ -740,12 +771,8 @@ fn inferred_start_spine_index(package: &proto::epub::EpubPackage<'_>) -> usize {
     }
 }
 
-fn valid_utf8_prefix_len(bytes: &[u8], complete: bool) -> Result<usize, ReaderCacheError> {
-    match core::str::from_utf8(bytes) {
-        Ok(_) => Ok(bytes.len()),
-        Err(err) if !complete && err.valid_up_to() > 0 => Ok(err.valid_up_to()),
-        Err(_) => Err(ReaderCacheError::Utf8),
-    }
+fn bytes_contain(haystack: &[u8], needle: &[u8]) -> bool {
+    haystack.windows(needle.len()).any(|window| window == needle)
 }
 
 fn load_epub_toc<Z>(
