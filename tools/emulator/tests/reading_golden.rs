@@ -251,6 +251,38 @@ fn reading_page_bodies_match_goldens_large_relaxed() {
     assert_page_matches_golden(&source, 0, "reading-page-large-relaxed-0");
 }
 
+/// The default grid holds exactly seventeen body lines: a paragraph
+/// split into seventeen one-line blocks (no inner paragraph gaps) fills
+/// one page, and an eighteenth line spills. Pins both the 26px default
+/// advance and the ink-height fit rule that stops charging a trailing
+/// paragraph gap against the page edge.
+#[test]
+fn default_grid_fits_seventeen_body_lines() {
+    let paragraph_of = |lines: usize| -> FixtureBlocks {
+        let blocks = (0..lines)
+            .map(|index| FixtureBlock {
+                record: record(TextRole::Body, TextAlign::Left, 1),
+                text: "line".into(),
+                style: FontStyle::Regular,
+                page_break_before: false,
+                paragraph_end: index == lines - 1,
+            })
+            .collect();
+        FixtureBlocks {
+            blocks,
+            settings: TypeSettings::DEFAULT,
+        }
+    };
+    assert_eq!(
+        paginate_block_pages(&paragraph_of(17), READER_PAGE_TOP, READER_PAGE_BOTTOM),
+        1
+    );
+    assert_eq!(
+        paginate_block_pages(&paragraph_of(18), READER_PAGE_TOP, READER_PAGE_BOTTOM),
+        2
+    );
+}
+
 /// Small/compact goes the other way: at least as much text per page.
 #[test]
 fn small_compact_paginates_no_worse_than_default() {

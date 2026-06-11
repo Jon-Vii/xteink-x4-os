@@ -207,9 +207,10 @@ fn draw_reader_footer(
     let mut label = String::<32>::new();
     let _ = write!(label, "{}/{}", section_current, section_total);
     let label_width = measure_text(label_font, label.as_str()) as i16;
-    // Digits and the slash carry no descenders, so the counter can sit
-    // this low; its ink top (~468) stays under the deepened page bottom.
-    let footer_y = 479;
+    // The slash inks 2 rows below its baseline, so 477 is as low as the
+    // counter goes without clipping the 480-row panel. READER_PAGE_BOTTOM
+    // is derived from this baseline; move them together.
+    let footer_y = 477;
     let footer_pad = 16;
     let label_x = READER_RIGHT_X - label_width - footer_pad;
     draw_text(fb, label_font, label.as_str(), label_x, footer_y, false);

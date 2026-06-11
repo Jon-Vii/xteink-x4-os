@@ -65,6 +65,14 @@ pub fn block_height(source: &impl ReadingBlocks, index: usize) -> i16 {
     height + paragraph_gap_after(source, index)
 }
 
+/// Block height without the trailing paragraph gap: the rows the block's
+/// own ink occupies. Pagination charges this against the page edge — the
+/// gap only separates blocks that share a page — while the cursor still
+/// advances by the gapped height.
+pub fn block_ink_height(source: &impl ReadingBlocks, index: usize) -> i16 {
+    block_height(source, index) - paragraph_gap_after(source, index)
+}
+
 pub fn paragraph_gap_after(source: &impl ReadingBlocks, index: usize) -> i16 {
     if source.paragraph_end(index) {
         paragraph_gap(
@@ -91,7 +99,7 @@ pub fn paginate_block_pages(source: &impl ReadingBlocks, page_top: i16, page_bot
         }
         let height = block_height(source, index);
 
-        if y + height > page_bottom && y > page_top {
+        if y + block_ink_height(source, index) > page_bottom && y > page_top {
             pages = pages.saturating_add(1);
             y = page_top;
         }
@@ -115,8 +123,9 @@ pub fn page_record_at(
 
     for index in 0..source.block_count() {
         let height = block_height(source, index);
-        let new_page =
-            (y + height > page_bottom || source.page_break_before(index)) && y > page_top;
+        let new_page = (y + block_ink_height(source, index) > page_bottom
+            || source.page_break_before(index))
+            && y > page_top;
         if new_page {
             if current == page_index {
                 return PageRecord {
@@ -155,7 +164,7 @@ pub fn for_each_drawable_block(
         let advance = line_advance(settings, record.role);
         let style = source.block_style(index);
         let height = block_height(source, index);
-        if y + height > READER_PAGE_BOTTOM && y > READER_PAGE_TOP {
+        if y + block_ink_height(source, index) > READER_PAGE_BOTTOM && y > READER_PAGE_TOP {
             break;
         }
         if !visit(ReaderDrawableBlock {
@@ -237,19 +246,20 @@ pub fn draw_reading_page_body(
     });
 }
 
-// Sized so the default 27px body grid closes: 3 + 17*27 = 462 ≤ 463 puts
-// seventeen lines on the page where 6/-4 fit sixteen and left ~28px (one
-// full row) dead above the footer. Last-line descenders reach ~467,
-// clearing the digits-only counter whose ink starts at ~468.
-pub const READER_PAGE_TOP: i16 = 3;
+pub const READER_PAGE_TOP: i16 = 6;
 pub const READER_FOOTER_TOP: i16 = 466;
-pub const READER_PAGE_BOTTOM: i16 = READER_FOOTER_TOP - 3;
+/// Last permissible baseline row for body ink. Derived, not tuned: the
+/// page counter's '/' ink starts at row 465 (baseline 477 minus 12), and
+/// the deepest body glyph reaches 7 rows below its baseline
+/// (comma-below diacritics), so 465 - 7 - 1 keeps every possible
+/// descender a clear row away from the counter.
+pub const READER_PAGE_BOTTOM: i16 = 457;
 pub const READER_LEFT_X: i16 = 8;
 pub const READER_RIGHT_X: i16 = 792;
 pub const READER_WRAP_SAFETY: i16 = 4;
 /// Version of the wrap rules and page constants in this module. Bump when
 /// layout changes for unchanged type settings.
-const READER_LAYOUT_VERSION: u16 = 6;
+const READER_LAYOUT_VERSION: u16 = 7;
 
 /// Section cache layout config: the wrap-rule version plus the type
 /// settings the section was paginated under. Stored in cache headers; a
@@ -264,14 +274,16 @@ pub fn body_font(settings: TypeSettings, style: FontStyle) -> &'static BitmapFon
 }
 
 /// Baseline-to-baseline advance. Body values per (size, spacing); H1/H2
-/// carry extra lead. Medium/Normal preserves the historical 27/32.
+/// carry extra lead. Medium/Normal runs 26 (130% leading) so the default
+/// page grid closes at seventeen lines: 6 + 17*26 = 448 <= 457, where the
+/// historical 27 left a dead row above the footer on every full page.
 pub fn line_advance(settings: TypeSettings, role: TextRole) -> i16 {
     let body = match (settings.size, settings.spacing) {
         (FontSize::Small, LineSpacing::Compact) => 22,
         (FontSize::Small, LineSpacing::Normal) => 24,
         (FontSize::Small, LineSpacing::Relaxed) => 28,
         (FontSize::Medium, LineSpacing::Compact) => 25,
-        (FontSize::Medium, LineSpacing::Normal) => 27,
+        (FontSize::Medium, LineSpacing::Normal) => 26,
         (FontSize::Medium, LineSpacing::Relaxed) => 31,
         (FontSize::Large, LineSpacing::Compact) => 29,
         (FontSize::Large, LineSpacing::Normal) => 32,
@@ -865,8 +877,8 @@ mod tests {
                 );
             }
         }
-        assert_eq!(line_advance(TypeSettings::DEFAULT, TextRole::Body), 27);
-        assert_eq!(line_advance(TypeSettings::DEFAULT, TextRole::Heading1), 32);
+        assert_eq!(line_advance(TypeSettings::DEFAULT, TextRole::Body), 26);
+        assert_eq!(line_advance(TypeSettings::DEFAULT, TextRole::Heading1), 31);
     }
 
     #[test]
