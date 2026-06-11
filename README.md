@@ -13,7 +13,7 @@ Italics, bold, and blockquotes render as the book intends. Chapters
 have a menu.
 
 A page turn takes about half a second. A refresh planner decides when a
-page deserves the full flash that clears ghosting, and when it does not.
+page deserves the full flash that clears ghosting.
 
 When you stop reading, the chip sleeps behind a sleep screen. Your
 place is saved to the card.
