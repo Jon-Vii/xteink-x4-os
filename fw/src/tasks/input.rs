@@ -4,14 +4,19 @@ use esp_hal::analog::adc::{Adc, AdcCalCurve, AdcCalScheme, AdcPin};
 use esp_hal::gpio::{GpioPin, Input};
 use esp_hal::peripherals::ADC1;
 
-const POLL_MS: u64 = 40;
+// 15 ms polling puts press-to-event latency at 30-45 ms (two debounce
+// ticks) instead of the 80-120 ms a 40 ms poll cost; the tick-based
+// constants below are scaled to keep their wall-clock behavior.
+const POLL_MS: u64 = 15;
 const CALIBRATION_ONLY: bool = false;
 const RAW_LOG_ENABLED: bool = false;
 const DEBOUNCE_TICKS: u8 = 2;
-const REPEAT_COOLDOWN_TICKS: u8 = 12;
+// ~480 ms between held-button repeats, matching the fast-refresh settle
+// cadence so one repeat advances one displayed page.
+const REPEAT_COOLDOWN_TICKS: u8 = 32;
 const NAV_BACK_MIN_MV: u16 = 2400;
 const NAV_BACK_MAX_MV: u16 = 2700;
-const RAW_LOG_TICKS: u8 = 25;
+const RAW_LOG_TICKS: u8 = 67;
 
 #[derive(Clone, Copy)]
 struct Band {

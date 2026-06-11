@@ -102,7 +102,12 @@ static INPUT_EXECUTOR: StaticCell<InterruptExecutor<0>> = StaticCell::new();
 
 #[entry]
 fn main() -> ! {
-    let peripherals = esp_hal::init(esp_hal::Config::default());
+    // Config::default() leaves the ESP32-C3 at 80 MHz; layout, panel byte
+    // transforms, and EPUB inflate are all CPU-bound, so run at full speed
+    // and rely on race-to-idle for power.
+    let mut config = esp_hal::Config::default();
+    config.cpu_clock = esp_hal::clock::CpuClock::Clock160MHz;
+    let peripherals = esp_hal::init(config);
     esp_println::println!("xteink-x4-os: boot");
 
     let timg0 = TimerGroup::new(peripherals.TIMG0);
