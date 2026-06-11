@@ -205,9 +205,13 @@ Current code status:
   Start to address; the 20 s join timeout deserves headroom or scan tuning),
   status repaints rode the 438 ms fast refresh, USB serial survived radio
   init, Back reset the device, and the saved position (page 619/ch 87) came
-  back intact after reboot. Still pending: a kosync round trip against a
-  real server (this build had no kosync account), and a heap high-water
-  reading (log esp_alloc::HEAP stats during a session).
+  back intact after reboot. A later same-day run validated the kosync
+  exchange in both directions against a LAN server: push (GET 404 -> PUT,
+  document id `bfc024...` partial-MD5, percentage 0.549), then pull (server
+  planted at 0.9 -> `kosync: pulled permille=900` -> StoreProgress -> boot
+  restore at screen 1016/chapter 127). Still pending: a heap high-water
+  reading (log esp_alloc::HEAP stats during a session) and interop against
+  a real kosync server implementation rather than a protocol stub.
 - Next: AP-mode web onboarding (hotspot + QR + credential form persisted to
   /XTEINK/WIFI.BIN via edge-dhcp + captive DNS), then browser EPUB upload
   through the same HTTP server in bounded chunks written by the board I/O
