@@ -148,13 +148,16 @@ pub async fn run(spawner: Spawner, wifi: WIFI, systimer: SYSTIMER, rng: RNG, rad
         park_until_exit().await;
     }
 
+    // The kosync exchange gets heap scratch for responses; the loaned
+    // http_b keeps the catalog listing the display task wrote for /list.
+    let kosync_response: &'static mut [u8] = alloc::vec![0u8; 2048].leak();
     let mut session = Session {
         controller,
         stack,
         tcp_rx,
         tcp_tx,
         http_a,
-        http_b,
+        http_b: kosync_response,
         book,
         started: false,
     };
@@ -184,7 +187,6 @@ pub async fn run(spawner: Spawner, wifi: WIFI, systimer: SYSTIMER, rng: RNG, rad
         tcp_rx,
         tcp_tx,
         http_a,
-        http_b,
         controller: _controller,
         ..
     } = session;
@@ -225,15 +227,14 @@ async fn exit_after_uploads() -> ! {
 
 const UPLOAD_PAGE: &str = concat!(
     r##"<!doctype html><html><head>"##,
+    r##"<meta charset=utf-8>"##,
     r##"<meta name=viewport content="width=device-width,initial-scale=1">"##,
-    r##"<title>Xteink X4 · The Shelf</title><style>"##,
+    r##"<title>Books · X4</title><style>"##,
     r##"body{font-family:Georgia,'Times New Roman',serif;margin:3em auto;"##,
     r##"max-width:26em;padding:0 1.2em;color:#1a1a1a;background:#fbfbf8}"##,
-    r##"h1{font-size:1em;font-weight:600;letter-spacing:.35em;"##,
-    r##"text-transform:uppercase;text-align:center;margin:0 0 .4em}"##,
-    r##"hr{border:0;border-top:1px solid #1a1a1a;margin:.2em 0 2em}"##,
     r##"h2{font-size:.8em;font-weight:600;letter-spacing:.25em;"##,
     r##"text-transform:uppercase;margin:2.2em 0 .8em}"##,
+    r##"h2:first-of-type{margin-top:.5em}"##,
     r##"h2:before{content:'— '}"##,
     r##"ul{list-style:none;margin:0;padding:0}"##,
     r##"li{display:flex;align-items:baseline;justify-content:space-between;"##,
@@ -248,8 +249,8 @@ const UPLOAD_PAGE: &str = concat!(
     r##"progress{width:7em;height:.45em;accent-color:#1a1a1a}"##,
     r##"footer{margin-top:3em;text-align:center;font-style:italic;"##,
     r##"color:#777;font-size:.85em}"##,
-    r##"</style></head><body><h1>Xteink X4</h1><hr>"##,
-    r##"<h2>On the shelf</h2><ul id=shelf><li><i>reading the card …</i></li></ul>"##,
+    r##"</style></head><body>"##,
+    r##"<h2>Books</h2><ul id=shelf><li><i>reading the card …</i></li></ul>"##,
     r##"<h2>Add books</h2>"##,
     r##"<div id=drop>drop EPUB files here — or click to choose</div>"##,
     r##"<input id=files type=file accept=.epub multiple hidden>"##,
@@ -264,8 +265,13 @@ const UPLOAD_PAGE: &str = concat!(
     r##"function row(label){const li=document.createElement('li');"##,
     r##"const span=document.createElement('span');span.textContent=label;"##,
     r##"li.appendChild(span);return li}"##,
-    r##"async function load(){const r=await fetch('/list');"##,
-    r##"const text=await r.text();shelf.textContent='';"##,
+    r##"async function load(){let text=null;"##,
+    r##"for(let i=0;i<5&&text===null;i++){try{"##,
+    r##"const r=await fetch('/list');if(r.ok)text=await r.text();}"##,
+    r##"catch(e){}if(text===null)await new Promise(d=>setTimeout(d,600))}"##,
+    r##"if(text===null){shelf.textContent='';"##,
+    r##"shelf.appendChild(row('— the card did not answer —'));return}"##,
+    r##"shelf.textContent='';"##,
     r##"const lines=text.split('
 ').filter(Boolean);"##,
     r##"if(!lines.length){shelf.appendChild(row('— nothing yet —'))}"##,
@@ -770,7 +776,11 @@ async fn write_http_response(
     }
     write_all(socket, b"HTTP/1.1 ").await?;
     write_all(socket, status.as_bytes()).await?;
-    write_all(socket, b"\r\ncontent-type: text/html\r\ncontent-length: ").await?;
+    write_all(
+        socket,
+        b"\r\ncontent-type: text/html; charset=utf-8\r\ncontent-length: ",
+    )
+    .await?;
     write_all(socket, &length[at..]).await?;
     write_all(socket, b"\r\nconnection: close\r\n\r\n").await?;
     write_all(socket, body.as_bytes()).await
