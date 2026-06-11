@@ -4,9 +4,9 @@ pub const ACTIVE_BOOK_ID: BookId = BookId(1);
 
 pub const BOOKS: [BookMeta<'static>; 1] = [BookMeta {
     id: ACTIVE_BOOK_ID,
-    title: "Flowers for Algernon",
-    author: "Daniel Keyes",
-    source_path: "/books/flowers-for-algernon.epub",
+    title: "About This Reader",
+    author: "",
+    source_path: "/built-in/guide",
     byte_size: 0,
     source: BookSource::BuiltIn,
     cover_status: CoverStatus::Missing,
@@ -14,24 +14,24 @@ pub const BOOKS: [BookMeta<'static>; 1] = [BookMeta {
 
 pub const CHAPTERS: [ChapterMeta<'static>; 4] = [
     ChapterMeta {
-        title: "Bring Up",
+        title: "Reading",
         spine_index: 0,
-        source_href: "demo/bring-up.xhtml",
+        source_href: "guide/reading.xhtml",
     },
     ChapterMeta {
-        title: "Architecture",
+        title: "Adding Books",
         spine_index: 1,
-        source_href: "demo/architecture.xhtml",
+        source_href: "guide/adding-books.xhtml",
     },
     ChapterMeta {
-        title: "Power",
+        title: "Wi-Fi Setup",
         spine_index: 2,
-        source_href: "demo/power.xhtml",
+        source_href: "guide/wifi-setup.xhtml",
     },
     ChapterMeta {
-        title: "Next Phase",
+        title: "Progress Sync",
         spine_index: 3,
-        source_href: "demo/next-phase.xhtml",
+        source_href: "guide/progress-sync.xhtml",
     },
 ];
 
@@ -63,74 +63,74 @@ impl ReaderLine {
 
 pub const READER_PAGES: [&[ReaderLine]; 4] = [
     &[
-        ReaderLine::new("A quiet page, finally", ReaderLineStyle::Heading, 18),
+        ReaderLine::new("Reading", ReaderLineStyle::Heading, 18),
         ReaderLine::new(
-            "This is the first proper Literata reading proof on the X4. It uses uppercase, lowercase, punctuation, and enough ordinary sentence rhythm to show whether the page breathes.",
+            "The two keys under your grip turn pages. On the front column: the top key backs out of any screen, the second confirms, and the lower pair browses.",
             ReaderLineStyle::Body,
             14,
         ),
         ReaderLine::new(
-            "Italic text should feel softer, not like a debug overlay.",
+            "While reading, confirm opens the chapter list and back returns home.",
+            ReaderLineStyle::Body,
+            14,
+        ),
+        ReaderLine::new(
+            "Your place is saved as you read and restored when the reader wakes.",
             ReaderLineStyle::Italic,
-            10,
+            0,
         ),
+    ],
+    &[
+        ReaderLine::new("Adding Books", ReaderLineStyle::Heading, 18),
         ReaderLine::new(
-            "Bold text marks headings, chapter names, and emphasis.",
-            ReaderLineStyle::Bold,
+            "Copy EPUB files into the books folder on the card, or send them from a browser: start sync from home, and once connected the screen shows an address.",
+            ReaderLineStyle::Body,
             14,
         ),
         ReaderLine::new(
-            "The margins are intentionally narrow because the device already gives the page a physical white border.",
+            "Open that address on any computer or phone on the same network to see what is on the card, add books, or remove them.",
+            ReaderLineStyle::Body,
+            14,
+        ),
+        ReaderLine::new(
+            "New books appear after the reader restarts.",
+            ReaderLineStyle::Italic,
+            0,
+        ),
+    ],
+    &[
+        ReaderLine::new("Wi-Fi Setup", ReaderLineStyle::Heading, 18),
+        ReaderLine::new(
+            "The first time you start sync, the reader opens its own hotspot instead of joining a network.",
+            ReaderLineStyle::Body,
+            14,
+        ),
+        ReaderLine::new(
+            "Scan the code on its screen with your phone, and enter your home network's name and password in the page that appears.",
+            ReaderLineStyle::Body,
+            14,
+        ),
+        ReaderLine::new(
+            "The reader remembers the network on its card; run sync again to connect.",
             ReaderLineStyle::Body,
             0,
         ),
     ],
     &[
-        ReaderLine::new("Typography model", ReaderLineStyle::Heading, 18),
+        ReaderLine::new("Progress Sync", ReaderLineStyle::Heading, 18),
         ReaderLine::new(
-            "EPUB text becomes styled runs before it reaches the panel. The renderer can choose Regular, Italic, Bold, or Bold Italic without changing the app state or reader controls.",
+            "Sync exchanges your reading position with a KOReader-compatible server: whichever device read furthest wins.",
             ReaderLineStyle::Body,
             14,
         ),
         ReaderLine::new(
-            "Block quotes will get indentation and a quieter italic voice.",
-            ReaderLineStyle::Quote,
-            10,
-        ),
-        ReaderLine::new(
-            "Bookerly stays user-provided later; Literata ships built in.",
-            ReaderLineStyle::Body,
-            0,
-        ),
-    ],
-    &[
-        ReaderLine::new("Pagination", ReaderLineStyle::Heading, 18),
-        ReaderLine::new(
-            "A reader should never build a giant layout tree just to turn one page. The firmware keeps cursors and bounded runs, then paints exactly the screen it needs.",
+            "Read a few pages here, sync, and pick up the same book on your phone or tablet exactly where you stopped.",
             ReaderLineStyle::Body,
             14,
         ),
         ReaderLine::new(
-            "Async input is coalesced while the display refreshes, so the CPU can go quiet instead of chasing a backlog of stale pages.",
-            ReaderLineStyle::Body,
-            0,
-        ),
-    ],
-    &[
-        ReaderLine::new("Storage", ReaderLineStyle::Heading, 18),
-        ReaderLine::new(
-            "The next hardware step is the microSD reader path.",
-            ReaderLineStyle::Body,
-            8,
-        ),
-        ReaderLine::new(
-            "Files will scan /books first, then the card root, and parse real EPUB metadata for title and author.",
-            ReaderLineStyle::Body,
-            14,
-        ),
-        ReaderLine::new(
-            "Progress belongs beside the books: current path, chapter, screen cursor, orientation, and refresh policy.",
-            ReaderLineStyle::Body,
+            "Sync pauses reading and ends with a quick restart.",
+            ReaderLineStyle::Italic,
             0,
         ),
     ],
