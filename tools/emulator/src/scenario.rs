@@ -33,6 +33,8 @@ struct Expect {
     selection: Option<u8>,
     orientation: Option<String>,
     refresh_policy: Option<String>,
+    font_size: Option<String>,
+    line_spacing: Option<String>,
     sleeping: Option<bool>,
     library_count: Option<u8>,
     last_button: Option<String>,
@@ -96,6 +98,24 @@ impl Scenario {
                 return Err(format!(
                     "expected refresh policy {expected:?}, got {:?}",
                     state.refresh_policy
+                ));
+            }
+        }
+        if let Some(size) = &self.expect.font_size {
+            let expected = parse_font_size(size)?;
+            if state.font_size != expected {
+                return Err(format!(
+                    "expected font size {expected:?}, got {:?}",
+                    state.font_size
+                ));
+            }
+        }
+        if let Some(spacing) = &self.expect.line_spacing {
+            let expected = parse_line_spacing(spacing)?;
+            if state.line_spacing != expected {
+                return Err(format!(
+                    "expected line spacing {expected:?}, got {:?}",
+                    state.line_spacing
                 ));
             }
         }
@@ -213,6 +233,24 @@ fn parse_refresh_policy(value: &str) -> Result<RefreshPolicy, String> {
         "FullOnWake" | "wake" => Ok(RefreshPolicy::FullOnWake),
         "FullEveryTen" | "ten" => Ok(RefreshPolicy::FullEveryTen),
         _ => Err(format!("unknown refresh policy: {value}")),
+    }
+}
+
+fn parse_font_size(value: &str) -> Result<display::font::FontSize, String> {
+    match value {
+        "Small" | "small" => Ok(display::font::FontSize::Small),
+        "Medium" | "medium" => Ok(display::font::FontSize::Medium),
+        "Large" | "large" => Ok(display::font::FontSize::Large),
+        _ => Err(format!("unknown font size: {value}")),
+    }
+}
+
+fn parse_line_spacing(value: &str) -> Result<display::font::LineSpacing, String> {
+    match value {
+        "Compact" | "compact" => Ok(display::font::LineSpacing::Compact),
+        "Normal" | "normal" => Ok(display::font::LineSpacing::Normal),
+        "Relaxed" | "relaxed" => Ok(display::font::LineSpacing::Relaxed),
+        _ => Err(format!("unknown line spacing: {value}")),
     }
 }
 

@@ -316,6 +316,20 @@ fn render_settings(fb: &mut Framebuffer, shell: &UiShell<'_>) {
         FIRST_ROW_Y + 64,
         shell.selection == 1,
     );
+    index_row(
+        fb,
+        "Type size",
+        font_size_label(shell.font_size),
+        FIRST_ROW_Y + 128,
+        shell.selection == 2,
+    );
+    index_row(
+        fb,
+        "Line spacing",
+        line_spacing_label(shell.line_spacing),
+        FIRST_ROW_Y + 192,
+        shell.selection == 3,
+    );
 
     finish_working_screen(fb, shell);
 }
@@ -617,5 +631,21 @@ fn refresh_policy_label(policy: UiRefreshPolicy) -> &'static str {
         UiRefreshPolicy::FastOnly => "fast only",
         UiRefreshPolicy::FullOnWake => "full on wake",
         UiRefreshPolicy::FullEveryTen => "full every ten",
+    }
+}
+
+fn font_size_label(size: display::font::FontSize) -> &'static str {
+    match size {
+        display::font::FontSize::Small => "small",
+        display::font::FontSize::Medium => "medium",
+        display::font::FontSize::Large => "large",
+    }
+}
+
+fn line_spacing_label(spacing: display::font::LineSpacing) -> &'static str {
+    match spacing {
+        display::font::LineSpacing::Compact => "compact",
+        display::font::LineSpacing::Normal => "normal",
+        display::font::LineSpacing::Relaxed => "relaxed",
     }
 }

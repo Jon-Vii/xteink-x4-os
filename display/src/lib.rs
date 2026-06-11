@@ -6,6 +6,7 @@ pub mod fb;
 pub mod font;
 pub mod literata_extra_generated;
 pub mod literata_generated;
+pub mod literata_sizes_generated;
 pub mod render;
 
 pub const WIDTH: usize = 800;

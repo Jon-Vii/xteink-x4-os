@@ -8,7 +8,7 @@ use crate::reader_store::ReaderStore;
 pub(crate) use display::font::{style_marker_code, STYLE_MARKER};
 use proto::cache::PageRecord;
 pub(crate) use ui::reading::{
-    first_styled_line_style, reader_x_for, READER_LAYOUT_CONFIG, READER_LEFT_X,
+    first_styled_line_style, reader_layout_config, reader_x_for, READER_LEFT_X,
     READER_PAGE_BOTTOM, READER_PAGE_TOP, READER_RIGHT_X, READER_WRAP_SAFETY,
 };
 use ui::reading::{

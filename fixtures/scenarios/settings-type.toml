@@ -1,0 +1,23 @@
+# The settings screen resting on the type rows: cursor on Line spacing
+# after bumping Type size to large, pinning the new rows' golden frame.
+
+[[steps]]
+button = "Next"
+
+[[steps]]
+button = "Next"
+
+[[steps]]
+button = "Next"
+
+[[steps]]
+button = "Confirm"
+
+[[steps]]
+button = "Next"
+
+[expect]
+view = "Settings"
+selection = 3
+font_size = "Large"
+line_spacing = "Normal"

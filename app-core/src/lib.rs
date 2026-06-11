@@ -1,9 +1,10 @@
 #![no_std]
 #![forbid(unsafe_code)]
 
+use display::font::{FontSize, LineSpacing, TypeSettings};
 use display::{epd::RefreshMode, Rect};
 
-pub const SETTINGS_ITEMS: u8 = 2;
+pub const SETTINGS_ITEMS: u8 = 4;
 pub const MAX_SD_CHAPTERS: usize = 128;
 pub const FIRST_SD_BOOK_ID: u32 = 2;
 
@@ -181,6 +182,8 @@ impl RefreshPlanner {
             || request.book_id != last.book_id
             // A type-settings change redraws whole text columns; the clean
             // pass avoids fast-diff ghosting across the page.
+            || request.font_size != last.font_size
+            || request.line_spacing != last.line_spacing
             || Self::needs_clean_library_refresh(request, last)
         {
             return RefreshMode::FastClean;
@@ -228,6 +231,8 @@ pub struct RenderRequest {
     pub book_id: u32,
     pub orientation: DisplayOrientation,
     pub refresh_policy: RefreshPolicy,
+    pub font_size: FontSize,
+    pub line_spacing: LineSpacing,
     pub last_button: Option<Button>,
     pub aux_raw: u16,
     pub nav_raw: u16,
@@ -254,6 +259,7 @@ pub enum StorageCommand {
         index: u8,
         chapter: u8,
         target_pages: u16,
+        type_settings: TypeSettings,
     },
     ExtendSection {
         request_id: u32,
@@ -261,6 +267,7 @@ pub enum StorageCommand {
         index: u8,
         chapter: u8,
         target_pages: u16,
+        type_settings: TypeSettings,
     },
     StoreProgress(PersistedAppState),
 }
@@ -294,6 +301,8 @@ pub enum LibraryEvent {
         page: u32,
         reading_orientation: u8,
         refresh_policy: u8,
+        font_size: u8,
+        line_spacing: u8,
     },
 }
 
@@ -313,6 +322,8 @@ pub struct PersistedAppState {
     pub shell_orientation: u8,
     pub reading_orientation: u8,
     pub refresh_policy: u8,
+    pub font_size: u8,
+    pub line_spacing: u8,
     pub source_hash: u32,
     pub source_size: u32,
 }
@@ -341,6 +352,8 @@ pub struct ReaderState {
     pub book_id: u32,
     pub orientation: DisplayOrientation,
     pub refresh_policy: RefreshPolicy,
+    pub font_size: FontSize,
+    pub line_spacing: LineSpacing,
     pub last_button: Option<Button>,
     pub aux_raw: u16,
     pub nav_raw: u16,
@@ -365,6 +378,8 @@ impl ReaderState {
             book_id: 1,
             orientation: DisplayOrientation::LandscapeButtonsBottom,
             refresh_policy: RefreshPolicy::FullOnWake,
+            font_size: FontSize::Medium,
+            line_spacing: LineSpacing::Normal,
             last_button: None,
             aux_raw: 0,
             nav_raw: 0,
@@ -564,6 +579,8 @@ impl ReaderState {
                 page,
                 reading_orientation,
                 refresh_policy,
+                font_size,
+                line_spacing,
             } => {
                 self.book_id = book_id;
                 self.chapter = chapter;
@@ -584,6 +601,12 @@ impl ReaderState {
                 }
                 if let Some(policy) = refresh_policy_from_u8(refresh_policy) {
                     self.refresh_policy = policy;
+                }
+                if let Some(size) = FontSize::from_u8(font_size) {
+                    self.font_size = size;
+                }
+                if let Some(spacing) = LineSpacing::from_u8(line_spacing) {
+                    self.line_spacing = spacing;
                 }
                 self.dirty = Rect::FULL;
             }
@@ -608,6 +631,8 @@ impl ReaderState {
             book_id: self.book_id,
             orientation: self.orientation,
             refresh_policy: self.refresh_policy,
+            font_size: self.font_size,
+            line_spacing: self.line_spacing,
             last_button: self.last_button,
             aux_raw: self.aux_raw,
             nav_raw: self.nav_raw,
@@ -627,8 +652,17 @@ impl ReaderState {
             shell_orientation: DisplayOrientation::PortraitButtonsLeft as u8,
             reading_orientation: self.orientation as u8,
             refresh_policy: self.refresh_policy as u8,
+            font_size: self.font_size as u8,
+            line_spacing: self.line_spacing as u8,
             source_hash: 0,
             source_size: 0,
+        }
+    }
+
+    pub fn type_settings(self) -> TypeSettings {
+        TypeSettings {
+            size: self.font_size,
+            spacing: self.line_spacing,
         }
     }
 
@@ -746,11 +780,25 @@ fn apply_setting(mut state: ReaderState) -> ReaderState {
                 }
             };
         }
-        _ => {
+        1 => {
             state.refresh_policy = match state.refresh_policy {
                 RefreshPolicy::FastOnly => RefreshPolicy::FullOnWake,
                 RefreshPolicy::FullOnWake => RefreshPolicy::FullEveryTen,
                 RefreshPolicy::FullEveryTen => RefreshPolicy::FastOnly,
+            };
+        }
+        2 => {
+            state.font_size = match state.font_size {
+                FontSize::Small => FontSize::Medium,
+                FontSize::Medium => FontSize::Large,
+                FontSize::Large => FontSize::Small,
+            };
+        }
+        _ => {
+            state.line_spacing = match state.line_spacing {
+                LineSpacing::Compact => LineSpacing::Normal,
+                LineSpacing::Normal => LineSpacing::Relaxed,
+                LineSpacing::Relaxed => LineSpacing::Compact,
             };
         }
     }
@@ -933,6 +981,24 @@ mod tests {
     }
 
     #[test]
+    fn settings_change_key_cycles_type_size_and_line_spacing() {
+        let state = press(ReaderState::boot(), Button::Next);
+        let state = press(press(state, Button::Next), Button::Next);
+        assert_eq!(state.selection, 2);
+        let state = press(state, Button::Confirm);
+        assert_eq!(state.font_size, FontSize::Large);
+        let state = press(press(state, Button::Confirm), Button::Confirm);
+        assert_eq!(state.font_size, FontSize::Medium);
+
+        let state = press(state, Button::Next);
+        assert_eq!(state.selection, 3);
+        let state = press(state, Button::Confirm);
+        assert_eq!(state.line_spacing, LineSpacing::Relaxed);
+        let state = press(state, Button::Next);
+        assert_eq!(state.selection, 0, "selection wraps after the last row");
+    }
+
+    #[test]
     fn library_restore_updates_progress_and_preferences() {
         let state = ReaderState::boot().apply_library_event(
             CTX,
@@ -942,6 +1008,8 @@ mod tests {
                 page: 12,
                 reading_orientation: DisplayOrientation::PortraitButtonsRight as u8,
                 refresh_policy: RefreshPolicy::FastOnly as u8,
+                font_size: FontSize::Large as u8,
+                line_spacing: LineSpacing::Compact as u8,
             },
         );
         assert_eq!(state.book_id, 2);
@@ -949,6 +1017,23 @@ mod tests {
         assert_eq!(state.page, 12);
         assert_eq!(state.orientation, DisplayOrientation::PortraitButtonsRight);
         assert_eq!(state.refresh_policy, RefreshPolicy::FastOnly);
+        assert_eq!(state.font_size, FontSize::Large);
+        assert_eq!(state.line_spacing, LineSpacing::Compact);
+    }
+
+    #[test]
+    fn refresh_plan_cleans_after_type_settings_change() {
+        let mut planner = RefreshPlanner::new();
+        let mut state = ReaderState::boot();
+        state.view = AppView::Settings;
+        let request = state.render_request(RenderKind::Page);
+        planner.record_render(request, RefreshMode::Full);
+
+        state.font_size = FontSize::Large;
+        assert_eq!(
+            planner.mode_for(state.render_request(RenderKind::Page)),
+            RefreshMode::FastClean
+        );
     }
 
     #[test]

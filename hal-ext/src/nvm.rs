@@ -12,6 +12,8 @@ pub struct AppStateRecord {
     pub shell_orientation: u8,
     pub reading_orientation: u8,
     pub refresh_policy: u8,
+    pub font_size: u8,
+    pub line_spacing: u8,
     pub source_hash: u32,
     pub source_size: u32,
 }
@@ -20,8 +22,12 @@ impl AppStateRecord {
     pub const ENCODED_LEN: usize = 32;
     const V1_ENCODED_LEN: usize = 24;
     const MAGIC: u32 = 0x5834_4F53;
-    const VERSION: u8 = 2;
+    const VERSION: u8 = 3;
+    const V2_VERSION: u8 = 2;
     const V1_VERSION: u8 = 1;
+    /// FontSize::Medium / LineSpacing::Normal as u8 in app-core.
+    const DEFAULT_FONT_SIZE: u8 = 1;
+    const DEFAULT_LINE_SPACING: u8 = 1;
 
     pub const fn new(book_id: u32) -> Self {
         Self {
@@ -31,6 +37,8 @@ impl AppStateRecord {
             shell_orientation: 3,
             reading_orientation: 0,
             refresh_policy: 1,
+            font_size: Self::DEFAULT_FONT_SIZE,
+            line_spacing: Self::DEFAULT_LINE_SPACING,
             source_hash: 0,
             source_size: 0,
         }
@@ -48,6 +56,10 @@ impl AppStateRecord {
         write_u32(&mut out, 14, self.screen);
         write_u32(&mut out, 18, self.source_hash);
         write_u32(&mut out, 22, self.source_size);
+        // V3 fills the two bytes V2 left as zero padding, keeping the
+        // record length and checksum span unchanged.
+        out[26] = self.font_size;
+        out[27] = self.line_spacing;
         let checksum = checksum(&out[..28]);
         write_u32(&mut out, 28, checksum);
         out
@@ -61,7 +73,7 @@ impl AppStateRecord {
             return None;
         }
         match bytes[4] {
-            Self::VERSION => {
+            Self::VERSION | Self::V2_VERSION => {
                 if bytes.len() < Self::ENCODED_LEN {
                     return None;
                 }
@@ -69,6 +81,11 @@ impl AppStateRecord {
                 if checksum(&bytes[..28]) != expected {
                     return None;
                 }
+                let (font_size, line_spacing) = if bytes[4] == Self::VERSION {
+                    (bytes[26], bytes[27])
+                } else {
+                    (Self::DEFAULT_FONT_SIZE, Self::DEFAULT_LINE_SPACING)
+                };
                 Some(Self {
                     book_id: read_u32(bytes, 8),
                     chapter: read_u16(bytes, 12),
@@ -76,6 +93,8 @@ impl AppStateRecord {
                     shell_orientation: bytes[5],
                     reading_orientation: bytes[6],
                     refresh_policy: bytes[7],
+                    font_size,
+                    line_spacing,
                     source_hash: read_u32(bytes, 18),
                     source_size: read_u32(bytes, 22),
                 })
@@ -92,6 +111,8 @@ impl AppStateRecord {
                     shell_orientation: bytes[5],
                     reading_orientation: bytes[6],
                     refresh_policy: bytes[7],
+                    font_size: Self::DEFAULT_FONT_SIZE,
+                    line_spacing: Self::DEFAULT_LINE_SPACING,
                     source_hash: 0,
                     source_size: 0,
                 })
@@ -145,4 +166,55 @@ fn read_u32(bytes: &[u8], offset: usize) -> u32 {
         | ((bytes[offset + 1] as u32) << 8)
         | ((bytes[offset + 2] as u32) << 16)
         | ((bytes[offset + 3] as u32) << 24)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn record() -> AppStateRecord {
+        AppStateRecord {
+            book_id: 7,
+            chapter: 3,
+            screen: 41,
+            shell_orientation: 2,
+            reading_orientation: 1,
+            refresh_policy: 2,
+            font_size: 2,
+            line_spacing: 0,
+            source_hash: 0xDEAD_BEEF,
+            source_size: 123_456,
+        }
+    }
+
+    #[test]
+    fn app_state_round_trips_with_type_settings() {
+        let encoded = record().encode();
+        assert_eq!(AppStateRecord::decode(&encoded), Some(record()));
+    }
+
+    #[test]
+    fn v2_records_decode_with_default_type_settings() {
+        // A V2 record is a V3 record with zeroed type bytes and version 2;
+        // the checksum spans the same 28 bytes in both versions.
+        let mut encoded = record().encode();
+        encoded[4] = AppStateRecord::V2_VERSION;
+        encoded[26] = 0;
+        encoded[27] = 0;
+        let checksum = checksum(&encoded[..28]);
+        write_u32(&mut encoded, 28, checksum);
+
+        let decoded = AppStateRecord::decode(&encoded).expect("v2 decodes");
+        assert_eq!(decoded.font_size, AppStateRecord::DEFAULT_FONT_SIZE);
+        assert_eq!(decoded.line_spacing, AppStateRecord::DEFAULT_LINE_SPACING);
+        assert_eq!(decoded.book_id, 7);
+        assert_eq!(decoded.source_hash, 0xDEAD_BEEF);
+    }
+
+    #[test]
+    fn corrupt_checksum_is_rejected() {
+        let mut encoded = record().encode();
+        encoded[26] ^= 0xFF;
+        assert_eq!(AppStateRecord::decode(&encoded), None);
+    }
 }

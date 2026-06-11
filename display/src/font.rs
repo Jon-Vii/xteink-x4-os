@@ -64,12 +64,84 @@ impl BitmapFont {
     }
 }
 
+/// Reader body size behind the Type Size setting. UI furniture keeps the
+/// fixed [`literata`] (Medium) set; only reading content scales.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum FontSize {
+    Small,
+    #[default]
+    Medium,
+    Large,
+}
+
+impl FontSize {
+    pub fn from_u8(value: u8) -> Option<Self> {
+        match value {
+            0 => Some(Self::Small),
+            1 => Some(Self::Medium),
+            2 => Some(Self::Large),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum LineSpacing {
+    Compact,
+    #[default]
+    Normal,
+    Relaxed,
+}
+
+impl LineSpacing {
+    pub fn from_u8(value: u8) -> Option<Self> {
+        match value {
+            0 => Some(Self::Compact),
+            1 => Some(Self::Normal),
+            2 => Some(Self::Relaxed),
+            _ => None,
+        }
+    }
+}
+
+/// The reader type settings that change page layout. Carried from the app
+/// reducer through storage commands into the cache build, so pagination,
+/// cached sections, and drawing always agree on one pair.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct TypeSettings {
+    pub size: FontSize,
+    pub spacing: LineSpacing,
+}
+
+impl TypeSettings {
+    pub const DEFAULT: Self = Self {
+        size: FontSize::Medium,
+        spacing: LineSpacing::Normal,
+    };
+}
+
 pub fn literata(style: FontStyle) -> &'static BitmapFont {
     match style {
         FontStyle::Regular => &crate::literata_generated::LITERATA_REGULAR,
         FontStyle::Italic => &crate::literata_generated::LITERATA_ITALIC,
         FontStyle::Bold => &crate::literata_generated::LITERATA_BOLD,
         FontStyle::BoldItalic => &crate::literata_generated::LITERATA_BOLD_ITALIC,
+    }
+}
+
+/// The reading body face at a user-selected size: 19px, 22px, or 26px.
+pub fn literata_sized(size: FontSize, style: FontStyle) -> &'static BitmapFont {
+    use crate::literata_sizes_generated as sizes;
+    match (size, style) {
+        (FontSize::Medium, _) => literata(style),
+        (FontSize::Small, FontStyle::Regular) => &sizes::LITERATA_19_REGULAR,
+        (FontSize::Small, FontStyle::Italic) => &sizes::LITERATA_19_ITALIC,
+        (FontSize::Small, FontStyle::Bold) => &sizes::LITERATA_19_BOLD,
+        (FontSize::Small, FontStyle::BoldItalic) => &sizes::LITERATA_19_BOLD_ITALIC,
+        (FontSize::Large, FontStyle::Regular) => &sizes::LITERATA_26_REGULAR,
+        (FontSize::Large, FontStyle::Italic) => &sizes::LITERATA_26_ITALIC,
+        (FontSize::Large, FontStyle::Bold) => &sizes::LITERATA_26_BOLD,
+        (FontSize::Large, FontStyle::BoldItalic) => &sizes::LITERATA_26_BOLD_ITALIC,
     }
 }
 

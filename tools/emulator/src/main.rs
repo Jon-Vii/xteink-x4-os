@@ -352,6 +352,7 @@ fn storage_command_for_transition(
             index,
             chapter: next.chapter,
             target_pages: 5,
+            type_settings: next.type_settings(),
         });
     }
 
@@ -362,6 +363,7 @@ fn storage_command_for_transition(
             index,
             chapter: next.chapter,
             target_pages: next.page.saturating_add(5).min(u16::MAX as u32) as u16,
+            type_settings: next.type_settings(),
         });
     }
 

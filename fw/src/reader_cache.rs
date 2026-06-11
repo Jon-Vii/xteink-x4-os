@@ -7,7 +7,7 @@ use crate::reader_store::{
     MAX_READER_BLOCK_TEXT,
 };
 use crate::sd_session::{self, SdSessionError};
-use display::font::{literata, FontStyle};
+use display::font::FontStyle;
 use embassy_time::Instant;
 use embedded_sdmmc::{Directory, File, Mode, TimeSource};
 use esp_hal::gpio::Output;
@@ -609,6 +609,7 @@ where
             xhtml_entry.compressed_size,
             xhtml_entry.uncompressed_size
         );
+        let type_settings = library.type_settings();
         let mut sink = LibraryBlockSink {
             library,
             root,
@@ -620,7 +621,7 @@ where
             book_partial: &mut book_partial,
             spine_index: spine_index.min(u16::MAX as usize) as u16,
             line: String::new(),
-            line_ink: StyledInkCursor::new(literata(FontStyle::Regular)),
+            line_ink: StyledInkCursor::new(type_settings, FontStyle::Regular),
             line_role: TextRole::Body,
             line_align: TextAlign::Justify,
             line_style: FontStyle::Regular,
@@ -1339,7 +1340,7 @@ fn flush_styled_preview_line<
         sink.spine_index,
     );
     sink.line.clear();
-    sink.line_ink = StyledInkCursor::new(literata(FontStyle::Regular));
+    sink.line_ink = StyledInkCursor::new(sink.library.type_settings(), FontStyle::Regular);
     sink.line_style = FontStyle::Regular;
     sink.pending_space = false;
 }

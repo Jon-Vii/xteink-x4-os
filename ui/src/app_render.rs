@@ -26,6 +26,8 @@ pub fn render_request(fb: &mut Framebuffer, request: RenderRequest, model: &UiRe
         view: ui_view(request.view),
         orientation: ui_orientation(request.orientation),
         refresh_policy: ui_refresh_policy(request.refresh_policy),
+        font_size: request.font_size,
+        line_spacing: request.line_spacing,
         selection: request.selection,
         chapter: request.chapter,
         page: request.page,

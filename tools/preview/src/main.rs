@@ -25,8 +25,9 @@ use ui::{
     UiTocItem, UiView,
 };
 
+use display::font::TypeSettings;
 use ui::reading::{
-    draw_styled_line, first_styled_line_style, line_advance_for, paragraph_gap, reader_x_for,
+    draw_styled_line, first_styled_line_style, line_advance, paragraph_gap, reader_x_for,
     styled_text_ink_width, READER_LEFT_X, READER_PAGE_BOTTOM as PAGE_BOTTOM,
     READER_PAGE_TOP as PAGE_TOP, READER_RIGHT_X, READER_WRAP_SAFETY,
 };
@@ -458,7 +459,6 @@ fn push_styled_fragment(
 
     normalize_decorative_separator(&mut normalized);
     let align = block_align_for(align, &normalized, role);
-    let font = literata(style);
     let x = reader_x_for(role);
     let max_x = READER_RIGHT_X;
 
@@ -480,7 +480,9 @@ fn push_styled_fragment(
         let mut candidate = sink.line.clone();
         append_styled_word(&mut candidate, word, style, leading_space);
         if !sink.line.is_empty()
-            && styled_text_ink_width(&candidate, font) + x + READER_WRAP_SAFETY > max_x
+            && styled_text_ink_width(&candidate, TypeSettings::DEFAULT, style) + x
+                + READER_WRAP_SAFETY
+                > max_x
         {
             flush_preview_line(sink, false);
             append_styled_word(&mut sink.line, word, style, false);
@@ -553,7 +555,7 @@ fn paginate(lines: &PreviewLines) -> Vec<PageSlice> {
             continue;
         }
 
-        let height = line_advance_for(line.role) + paragraph_gap_after(line);
+        let height = line_advance(TypeSettings::DEFAULT, line.role) + paragraph_gap_after(line);
         if (line.page_break_before || y + height > PAGE_BOTTOM) && line_count > 0 {
             pages.push(PageSlice {
                 first_line,
@@ -585,17 +587,16 @@ fn draw_preview_page(fb: &mut Framebuffer, lines: &PreviewLines, page: PageSlice
         if line.text.is_empty() {
             continue;
         }
-        let font = literata(line.style);
         let x = match line.align {
             TextAlign::Center => {
-                let width =
-                    styled_text_ink_width(&line.text, font).min(READER_RIGHT_X - READER_LEFT_X);
+                let width = styled_text_ink_width(&line.text, TypeSettings::DEFAULT, line.style)
+                    .min(READER_RIGHT_X - READER_LEFT_X);
                 ((WIDTH as i16 - width) / 2).max(READER_LEFT_X)
             }
             TextAlign::Left | TextAlign::Justify => reader_x_for(line.role),
         };
-        draw_styled_line(fb, &line.text, x, y, line.style);
-        y += line_advance_for(line.role) + paragraph_gap_after(line);
+        draw_styled_line(fb, TypeSettings::DEFAULT, &line.text, x, y, line.style);
+        y += line_advance(TypeSettings::DEFAULT, line.role) + paragraph_gap_after(line);
     }
 }
 
@@ -1746,6 +1747,8 @@ fn write_shell_preview(out: &Path, name: &str, view: UiView, selection: u8) -> s
         view,
         orientation: UiOrientation::LandscapeButtonsBottom,
         refresh_policy: UiRefreshPolicy::FullOnWake,
+        font_size: display::font::FontSize::Medium,
+        line_spacing: display::font::LineSpacing::Normal,
         selection,
         chapter: 2,
         page: 141,

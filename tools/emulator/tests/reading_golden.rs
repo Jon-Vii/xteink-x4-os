@@ -8,7 +8,7 @@
 use std::path::{Path, PathBuf};
 
 use display::fb::Framebuffer;
-use display::font::{style_marker_code, FontStyle, STYLE_MARKER};
+use display::font::{style_marker_code, FontSize, FontStyle, LineSpacing, TypeSettings, STYLE_MARKER};
 use proto::cache::BlockRecord;
 use proto::text::{TextAlign, TextRole};
 use ui::reading::{
@@ -26,6 +26,7 @@ struct FixtureBlock {
 
 struct FixtureBlocks {
     blocks: Vec<FixtureBlock>,
+    settings: TypeSettings,
 }
 
 impl ReadingBlocks for FixtureBlocks {
@@ -64,6 +65,10 @@ impl ReadingBlocks for FixtureBlocks {
             .map(|block| block.paragraph_end)
             .unwrap_or(true)
     }
+
+    fn type_settings(&self) -> TypeSettings {
+        self.settings
+    }
 }
 
 fn record(role: TextRole, align: TextAlign, line_count: u8) -> BlockRecord {
@@ -92,7 +97,7 @@ fn styled(runs: &[(FontStyle, &str)]) -> String {
     out
 }
 
-fn fixture() -> FixtureBlocks {
+fn fixture(settings: TypeSettings) -> FixtureBlocks {
     let mut blocks = Vec::new();
     blocks.push(FixtureBlock {
         record: record(TextRole::Heading1, TextAlign::Center, 1),
@@ -160,7 +165,7 @@ fn fixture() -> FixtureBlocks {
         page_break_before: false,
         paragraph_end: true,
     });
-    FixtureBlocks { blocks }
+    FixtureBlocks { blocks, settings }
 }
 
 fn encode_png(fb: &Framebuffer) -> Vec<u8> {
@@ -184,40 +189,80 @@ fn encode_png(fb: &Framebuffer) -> Vec<u8> {
     bytes
 }
 
-fn golden_path(page_index: usize) -> PathBuf {
+fn golden_path(name: &str) -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../../fixtures/golden")
-        .join(format!("reading-page-{page_index}.png"))
+        .join(format!("{name}.png"))
+}
+
+fn assert_page_matches_golden(source: &FixtureBlocks, page_index: usize, name: &str) {
+    let page = page_record_at(source, page_index, READER_PAGE_TOP, READER_PAGE_BOTTOM);
+    assert!(page.block_count > 0, "page {page_index} should hold blocks");
+    let mut fb = Framebuffer::new();
+    draw_reading_page_body(&mut fb, source, page);
+    let actual = encode_png(&fb);
+    let path = golden_path(name);
+    if std::env::var("REGEN_READING_GOLDEN").is_ok() {
+        std::fs::write(&path, &actual).expect("write golden");
+        return;
+    }
+    let expected = std::fs::read(&path).unwrap_or_else(|err| {
+        panic!(
+            "missing golden {} ({err}); run with REGEN_READING_GOLDEN=1 to create",
+            path.display()
+        )
+    });
+    assert_eq!(
+        actual,
+        expected,
+        "reading page {page_index} diverged from {}",
+        path.display()
+    );
 }
 
 #[test]
 fn reading_page_bodies_match_goldens() {
-    let source = fixture();
+    let source = fixture(TypeSettings::DEFAULT);
     let pages = paginate_block_pages(&source, READER_PAGE_TOP, READER_PAGE_BOTTOM);
     assert!(pages >= 2, "fixture should span at least two pages, got {pages}");
 
     for page_index in 0..2 {
-        let page = page_record_at(&source, page_index, READER_PAGE_TOP, READER_PAGE_BOTTOM);
-        assert!(page.block_count > 0, "page {page_index} should hold blocks");
-        let mut fb = Framebuffer::new();
-        draw_reading_page_body(&mut fb, &source, page);
-        let actual = encode_png(&fb);
-        let path = golden_path(page_index);
-        if std::env::var("REGEN_READING_GOLDEN").is_ok() {
-            std::fs::write(&path, &actual).expect("write golden");
-            continue;
-        }
-        let expected = std::fs::read(&path).unwrap_or_else(|err| {
-            panic!(
-                "missing golden {} ({err}); run with REGEN_READING_GOLDEN=1 to create",
-                path.display()
-            )
-        });
-        assert_eq!(
-            actual,
-            expected,
-            "reading page {page_index} diverged from {}",
-            path.display()
-        );
+        assert_page_matches_golden(&source, page_index, &format!("reading-page-{page_index}"));
     }
+}
+
+/// The same blocks at the large size with relaxed leading: fewer lines fit
+/// a page, so the fixture must paginate onto more pages than the default,
+/// and the first page's frame is pinned.
+#[test]
+fn reading_page_bodies_match_goldens_large_relaxed() {
+    let source = fixture(TypeSettings {
+        size: FontSize::Large,
+        spacing: LineSpacing::Relaxed,
+    });
+    let default_pages =
+        paginate_block_pages(&fixture(TypeSettings::DEFAULT), READER_PAGE_TOP, READER_PAGE_BOTTOM);
+    let pages = paginate_block_pages(&source, READER_PAGE_TOP, READER_PAGE_BOTTOM);
+    assert!(
+        pages > default_pages,
+        "large/relaxed must need more pages ({pages}) than default ({default_pages})"
+    );
+
+    assert_page_matches_golden(&source, 0, "reading-page-large-relaxed-0");
+}
+
+/// Small/compact goes the other way: at least as much text per page.
+#[test]
+fn small_compact_paginates_no_worse_than_default() {
+    let source = fixture(TypeSettings {
+        size: FontSize::Small,
+        spacing: LineSpacing::Compact,
+    });
+    let default_pages =
+        paginate_block_pages(&fixture(TypeSettings::DEFAULT), READER_PAGE_TOP, READER_PAGE_BOTTOM);
+    let pages = paginate_block_pages(&source, READER_PAGE_TOP, READER_PAGE_BOTTOM);
+    assert!(
+        pages <= default_pages,
+        "small/compact must not need more pages ({pages}) than default ({default_pages})"
+    );
 }

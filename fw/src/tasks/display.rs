@@ -221,6 +221,7 @@ fn handle_storage_command(
             index,
             chapter,
             target_pages,
+            type_settings,
         }
         | StorageCommand::ExtendSection {
             request_id,
@@ -228,6 +229,7 @@ fn handle_storage_command(
             index,
             chapter,
             target_pages,
+            type_settings,
         } => {
             if request_id != LATEST_READER_REQUEST_ID.load(Ordering::Relaxed) {
                 esp_println::println!(
@@ -239,6 +241,10 @@ fn handle_storage_command(
                 );
                 return;
             }
+            // Adopt the command's type settings before the RAM fast path:
+            // a settings change drops the loaded page coverage, so the
+            // request falls through to the cache load/rebuild below.
+            sd_library.set_type_settings(type_settings);
             // The requested page is usually inside the section window that
             // is already loaded; answering from RAM keeps ordinary page
             // turns free of card init, FAT, and cache-file traffic.
@@ -298,6 +304,8 @@ fn handle_storage_command(
                 shell_orientation: record.shell_orientation,
                 reading_orientation: record.reading_orientation,
                 refresh_policy: record.refresh_policy,
+                font_size: record.font_size,
+                line_spacing: record.line_spacing,
                 source_hash,
                 source_size,
             };

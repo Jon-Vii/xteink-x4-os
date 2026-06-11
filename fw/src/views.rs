@@ -153,8 +153,15 @@ fn ui_library_status(status: LibraryScanStatus) -> UiLibraryStatus {
 }
 
 fn draw_sd_reader_page(fb: &mut Framebuffer, request: RenderRequest, sd_library: &ReaderStore) {
-    let selected_book_loaded =
-        sd_library.loaded_index == ReaderStore::selected_book_index(request.book_id);
+    // A store paginated under different type settings is as unusable as an
+    // unloaded one; show the loading plate until the relayout lands.
+    let layout_current = sd_library.type_settings()
+        == display::font::TypeSettings {
+            size: request.font_size,
+            spacing: request.line_spacing,
+        };
+    let selected_book_loaded = layout_current
+        && sd_library.loaded_index == ReaderStore::selected_book_index(request.book_id);
     match (sd_library.reader_status(), selected_book_loaded) {
         (_, false) | (BookLoadStatus::Empty | BookLoadStatus::Loading, _) => {
             draw_sd_reader_loading(fb, request, sd_library);

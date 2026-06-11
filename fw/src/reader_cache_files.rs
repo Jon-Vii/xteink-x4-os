@@ -303,7 +303,7 @@ where
             author_text_bytes,
             viewport_width: 800,
             viewport_height: 480,
-            font_config: reader_layout::READER_LAYOUT_CONFIG,
+            font_config: reader_layout::reader_layout_config(library.type_settings()),
             partial,
         };
         let mut bytes = [0u8; BOOK_V2_HEADER_BYTES];
@@ -458,7 +458,14 @@ where
         {
             return CacheLoadResult::Invalid;
         }
-        let layout_matches = header.font_config == reader_layout::READER_LAYOUT_CONFIG;
+        let expected_config = reader_layout::reader_layout_config(library.type_settings());
+        // Cached blocks are pre-wrapped lines: they survive a spacing
+        // change (heights re-walk below) but not a size change, which
+        // alters every wrap point and needs the full EPUB rebuild.
+        if header.font_config & !0b11 != expected_config & !0b11 {
+            return CacheLoadResult::Invalid;
+        }
+        let layout_matches = header.font_config == expected_config;
         if !load_v2_section_body(file, header, library) {
             return CacheLoadResult::Invalid;
         }
@@ -827,7 +834,7 @@ where
         text_bytes: library.text_len.min(u32::MAX as usize) as u32,
         viewport_width: 800,
         viewport_height: 480,
-        font_config: reader_layout::READER_LAYOUT_CONFIG,
+        font_config: reader_layout::reader_layout_config(library.type_settings()),
         bytes_consumed: 0,
         total_bytes: 0,
         partial: library.section_partial,

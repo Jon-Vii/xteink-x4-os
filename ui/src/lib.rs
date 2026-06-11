@@ -68,6 +68,8 @@ pub struct UiShell<'a> {
     pub view: UiView,
     pub orientation: UiOrientation,
     pub refresh_policy: UiRefreshPolicy,
+    pub font_size: display::font::FontSize,
+    pub line_spacing: display::font::LineSpacing,
     pub selection: u8,
     pub chapter: u8,
     pub page: u32,

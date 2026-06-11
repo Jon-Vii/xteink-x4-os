@@ -9,7 +9,8 @@
 
 use display::fb::Framebuffer;
 use display::font::{
-    draw_text, literata, measure_text, style_from_marker_code, BitmapFont, FontStyle, STYLE_MARKER,
+    draw_text, literata_sized, measure_text, style_from_marker_code, BitmapFont, FontSize,
+    FontStyle, LineSpacing, TypeSettings, STYLE_MARKER,
 };
 use proto::cache::{BlockRecord, PageRecord};
 use proto::text::{TextAlign, TextRole};
@@ -26,6 +27,13 @@ pub trait ReadingBlocks {
     fn block_style(&self, index: usize) -> FontStyle;
     fn page_break_before(&self, index: usize) -> bool;
     fn paragraph_end(&self, index: usize) -> bool;
+    /// Type settings the blocks were laid out under. Every height,
+    /// pagination, and drawing call in this module reads them from the
+    /// source, so a store can never paginate with one size and draw with
+    /// another.
+    fn type_settings(&self) -> TypeSettings {
+        TypeSettings::DEFAULT
+    }
 }
 
 pub struct ReaderDrawableBlock<'a> {
@@ -41,12 +49,13 @@ pub fn block_height(source: &impl ReadingBlocks, index: usize) -> i16 {
     let Some(record) = source.block(index) else {
         return 0;
     };
-    let advance = line_advance_for(record.role);
+    let settings = source.type_settings();
+    let advance = line_advance(settings, record.role);
     let height = if record.line_count == 1 {
         advance
     } else {
         wrapped_block_height(
-            literata(source.block_style(index)),
+            body_font(settings, source.block_style(index)),
             source.block_text(index),
             record.role,
             record.align,
@@ -135,6 +144,7 @@ pub fn for_each_drawable_block(
     page: PageRecord,
     mut visit: impl FnMut(ReaderDrawableBlock<'_>) -> bool,
 ) {
+    let settings = source.type_settings();
     let mut y = READER_PAGE_TOP;
     for offset in 0..page.block_count as usize {
         let index = page.first_block as usize + offset;
@@ -142,7 +152,7 @@ pub fn for_each_drawable_block(
             break;
         };
         let text = source.block_text(index);
-        let advance = line_advance_for(record.role);
+        let advance = line_advance(settings, record.role);
         let style = source.block_style(index);
         let height = block_height(source, index);
         if y + height > READER_PAGE_BOTTOM && y > READER_PAGE_TOP {
@@ -154,7 +164,7 @@ pub fn for_each_drawable_block(
             y: y + advance,
             advance,
             style,
-            font: literata(style),
+            font: body_font(settings, style),
         }) {
             break;
         }
@@ -169,13 +179,14 @@ pub fn draw_reading_page_body(
     source: &impl ReadingBlocks,
     page: PageRecord,
 ) {
+    let settings = source.type_settings();
     for_each_drawable_block(source, page, |block| {
         let role = block.record.role;
         match block.record.align {
             TextAlign::Left => {
                 let x = reader_x_for(role);
                 if block.record.line_count == 1 {
-                    draw_styled_line(fb, block.text, x, block.y, block.style);
+                    draw_styled_line(fb, settings, block.text, x, block.y, block.style);
                 } else {
                     draw_wrapped_literata(
                         fb,
@@ -191,7 +202,7 @@ pub fn draw_reading_page_body(
             TextAlign::Justify => {
                 let x = reader_x_for(role);
                 if block.record.line_count == 1 {
-                    draw_styled_line(fb, block.text, x, block.y, block.style);
+                    draw_styled_line(fb, settings, block.text, x, block.y, block.style);
                 } else {
                     draw_justified_wrapped_literata(
                         fb,
@@ -206,10 +217,10 @@ pub fn draw_reading_page_body(
             }
             TextAlign::Center => {
                 if block.record.line_count == 1 {
-                    let width = styled_text_ink_width(block.text, block.font)
+                    let width = styled_text_ink_width(block.text, settings, block.style)
                         .min(READER_RIGHT_X - READER_LEFT_X);
                     let x = ((display::WIDTH as i16 - width) / 2).max(READER_LEFT_X);
-                    draw_styled_line(fb, block.text, x, block.y, block.style);
+                    draw_styled_line(fb, settings, block.text, x, block.y, block.style);
                 } else {
                     draw_centered_wrapped_literata(
                         fb,
@@ -232,15 +243,40 @@ pub const READER_PAGE_BOTTOM: i16 = READER_FOOTER_TOP - 4;
 pub const READER_LEFT_X: i16 = 8;
 pub const READER_RIGHT_X: i16 = 792;
 pub const READER_WRAP_SAFETY: i16 = 4;
-/// Section cache pagination version. Bump when any constant or wrap rule in
-/// this module changes the resulting page layout.
-pub const READER_LAYOUT_CONFIG: u16 = 4;
+/// Version of the wrap rules and page constants in this module. Bump when
+/// layout changes for unchanged type settings.
+const READER_LAYOUT_VERSION: u16 = 5;
 
-pub fn line_advance_for(role: TextRole) -> i16 {
+/// Section cache layout config: the wrap-rule version plus the type
+/// settings the section was paginated under. Stored in cache headers; a
+/// mismatch on load invalidates the cached pagination and rebuilds it.
+pub fn reader_layout_config(settings: TypeSettings) -> u16 {
+    (READER_LAYOUT_VERSION << 4) | ((settings.size as u16) << 2) | settings.spacing as u16
+}
+
+/// The reading body face for the given settings and style run.
+pub fn body_font(settings: TypeSettings, style: FontStyle) -> &'static BitmapFont {
+    literata_sized(settings.size, style)
+}
+
+/// Baseline-to-baseline advance. Body values per (size, spacing); H1/H2
+/// carry extra lead. Medium/Normal preserves the historical 27/32.
+pub fn line_advance(settings: TypeSettings, role: TextRole) -> i16 {
+    let body = match (settings.size, settings.spacing) {
+        (FontSize::Small, LineSpacing::Compact) => 22,
+        (FontSize::Small, LineSpacing::Normal) => 24,
+        (FontSize::Small, LineSpacing::Relaxed) => 28,
+        (FontSize::Medium, LineSpacing::Compact) => 25,
+        (FontSize::Medium, LineSpacing::Normal) => 27,
+        (FontSize::Medium, LineSpacing::Relaxed) => 31,
+        (FontSize::Large, LineSpacing::Compact) => 29,
+        (FontSize::Large, LineSpacing::Normal) => 32,
+        (FontSize::Large, LineSpacing::Relaxed) => 36,
+    };
     if matches!(role, TextRole::Heading1 | TextRole::Heading2) {
-        32
+        body + 5
     } else {
-        27
+        body
     }
 }
 
@@ -309,19 +345,22 @@ pub fn text_ink_width(font: &'static BitmapFont, text: &str) -> i16 {
 }
 
 /// Incremental ink measurement over cached styled text: [`STYLE_MARKER`]
-/// followed by a style digit switches the active font mid-stream. `Copy`,
-/// so callers can checkpoint before a word and roll back on overflow.
+/// followed by a style digit switches the active font mid-stream, staying
+/// inside one type size. `Copy`, so callers can checkpoint before a word
+/// and roll back on overflow.
 #[derive(Clone, Copy)]
 pub struct StyledInkCursor {
     ink: InkCursor,
+    size: FontSize,
     font: &'static BitmapFont,
 }
 
 impl StyledInkCursor {
-    pub fn new(default_font: &'static BitmapFont) -> Self {
+    pub fn new(settings: TypeSettings, default_style: FontStyle) -> Self {
         Self {
             ink: InkCursor::new(),
-            font: default_font,
+            size: settings.size,
+            font: literata_sized(settings.size, default_style),
         }
     }
 
@@ -332,8 +371,10 @@ impl StyledInkCursor {
         while let Some(ch) = chars.next() {
             if ch == STYLE_MARKER {
                 if let Some(code) = chars.next() {
-                    self.font =
-                        literata(style_from_marker_code(code).unwrap_or(FontStyle::Regular));
+                    self.font = literata_sized(
+                        self.size,
+                        style_from_marker_code(code).unwrap_or(FontStyle::Regular),
+                    );
                 }
                 continue;
             }
@@ -346,8 +387,8 @@ impl StyledInkCursor {
     }
 }
 
-pub fn styled_text_ink_width(text: &str, default_font: &'static BitmapFont) -> i16 {
-    let mut cursor = StyledInkCursor::new(default_font);
+pub fn styled_text_ink_width(text: &str, settings: TypeSettings, default_style: FontStyle) -> i16 {
+    let mut cursor = StyledInkCursor::new(settings, default_style);
     cursor.push_str(text);
     cursor.width()
 }
@@ -444,6 +485,7 @@ pub fn wrapped_block_height(
 
 pub fn draw_styled_line(
     fb: &mut Framebuffer,
+    settings: TypeSettings,
     text: &str,
     x: i16,
     baseline_y: i16,
@@ -460,7 +502,7 @@ pub fn draw_styled_line(
         if run_start < index {
             cursor_x = draw_text(
                 fb,
-                literata(style),
+                body_font(settings, style),
                 &text[run_start..index],
                 cursor_x,
                 baseline_y,
@@ -477,7 +519,7 @@ pub fn draw_styled_line(
     if run_start < text.len() {
         cursor_x = draw_text(
             fb,
-            literata(style),
+            body_font(settings, style),
             &text[run_start..],
             cursor_x,
             baseline_y,
@@ -707,13 +749,38 @@ mod tests {
         "beyond bmp \u{1F600} falls back to question mark",
     ];
 
+    const STYLES: [FontStyle; 4] = [
+        FontStyle::Regular,
+        FontStyle::Italic,
+        FontStyle::Bold,
+        FontStyle::BoldItalic,
+    ];
+
+    const ALL_SETTINGS: [TypeSettings; 9] = {
+        let sizes = [FontSize::Small, FontSize::Medium, FontSize::Large];
+        let spacings = [
+            LineSpacing::Compact,
+            LineSpacing::Normal,
+            LineSpacing::Relaxed,
+        ];
+        let mut out = [TypeSettings::DEFAULT; 9];
+        let mut i = 0;
+        while i < 3 {
+            let mut j = 0;
+            while j < 3 {
+                out[i * 3 + j] = TypeSettings {
+                    size: sizes[i],
+                    spacing: spacings[j],
+                };
+                j += 1;
+            }
+            i += 1;
+        }
+        out
+    };
+
     fn fonts() -> [&'static BitmapFont; 4] {
-        [
-            literata(FontStyle::Regular),
-            literata(FontStyle::Italic),
-            literata(FontStyle::Bold),
-            literata(FontStyle::BoldItalic),
-        ]
+        STYLES.map(|style| body_font(TypeSettings::DEFAULT, style))
     }
 
     #[test]
@@ -757,15 +824,45 @@ mod tests {
 
     #[test]
     fn styled_width_matches_unstyled_when_unmarked() {
-        for font in fonts() {
-            for sample in SAMPLES {
-                assert_eq!(
-                    styled_text_ink_width(sample, font),
-                    naive_text_ink_width(font, sample),
-                    "sample {sample:?}"
+        for settings in ALL_SETTINGS {
+            for style in STYLES {
+                for sample in SAMPLES {
+                    assert_eq!(
+                        styled_text_ink_width(sample, settings, style),
+                        naive_text_ink_width(body_font(settings, style), sample),
+                        "sample {sample:?} settings {settings:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn layout_configs_are_distinct_per_type_settings() {
+        let mut seen = [0u16; 9];
+        for (index, settings) in ALL_SETTINGS.iter().enumerate() {
+            let config = reader_layout_config(*settings);
+            assert!(
+                !seen[..index].contains(&config),
+                "duplicate layout config {config} for {settings:?}"
+            );
+            seen[index] = config;
+        }
+    }
+
+    #[test]
+    fn line_advances_grow_with_size_and_spacing() {
+        for role in [TextRole::Body, TextRole::Heading1] {
+            for window in ALL_SETTINGS.windows(2) {
+                assert!(
+                    line_advance(window[0], role) < line_advance(window[1], role)
+                        || window[0].size != window[1].size,
+                    "advance must grow with spacing within a size: {window:?}"
                 );
             }
         }
+        assert_eq!(line_advance(TypeSettings::DEFAULT, TextRole::Body), 27);
+        assert_eq!(line_advance(TypeSettings::DEFAULT, TextRole::Heading1), 32);
     }
 
     #[test]
@@ -779,31 +876,32 @@ mod tests {
         let _ = styled.push(style_marker_code(FontStyle::Bold));
         let _ = styled.push_str("heavy end");
 
-        let font = literata(FontStyle::Regular);
         // Push in arbitrary fragments; the running width must match a
-        // one-shot measure at every fragment boundary.
-        let text = styled.as_str();
-        let mut cursor = StyledInkCursor::new(font);
-        let mut consumed = 0usize;
-        for chunk in [3usize, 1, 9, 2, 30, 200] {
-            let end = (consumed + chunk).min(text.len());
-            while !text.is_char_boundary(consumed.min(text.len())) {
-                consumed += 1;
-            }
-            let mut safe_end = end;
-            while safe_end < text.len() && !text.is_char_boundary(safe_end) {
-                safe_end += 1;
-            }
-            cursor.push_str(&text[consumed..safe_end]);
-            consumed = safe_end;
-            assert_eq!(
-                cursor.width(),
-                styled_text_ink_width(&text[..consumed], font),
-                "prefix {:?}",
-                &text[..consumed]
-            );
-            if consumed >= text.len() {
-                break;
+        // one-shot measure at every fragment boundary, at every size.
+        for settings in ALL_SETTINGS {
+            let text = styled.as_str();
+            let mut cursor = StyledInkCursor::new(settings, FontStyle::Regular);
+            let mut consumed = 0usize;
+            for chunk in [3usize, 1, 9, 2, 30, 200] {
+                let end = (consumed + chunk).min(text.len());
+                while !text.is_char_boundary(consumed.min(text.len())) {
+                    consumed += 1;
+                }
+                let mut safe_end = end;
+                while safe_end < text.len() && !text.is_char_boundary(safe_end) {
+                    safe_end += 1;
+                }
+                cursor.push_str(&text[consumed..safe_end]);
+                consumed = safe_end;
+                assert_eq!(
+                    cursor.width(),
+                    styled_text_ink_width(&text[..consumed], settings, FontStyle::Regular),
+                    "prefix {:?} settings {settings:?}",
+                    &text[..consumed]
+                );
+                if consumed >= text.len() {
+                    break;
+                }
             }
         }
     }

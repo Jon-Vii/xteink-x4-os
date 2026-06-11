@@ -1,5 +1,5 @@
 use app_core::{ReaderSource, MAX_SD_CHAPTERS};
-use display::font::FontStyle;
+use display::font::{FontStyle, TypeSettings};
 use heapless::String;
 use proto::cache::{
     BlockRecord, BookV2SectionRecord, PageRecord, TocRecord, CACHE_KEY_BYTES, COVER_BYTES,
@@ -143,6 +143,7 @@ pub(crate) struct ReaderStore {
     pub(crate) pages: [PageRecord; MAX_READER_PAGES],
     pub(crate) page_spine: [u16; MAX_READER_PAGES],
     pub(crate) page_count: usize,
+    type_settings: TypeSettings,
 }
 
 impl ReaderStore {
@@ -188,7 +189,25 @@ impl ReaderStore {
             pages: [EMPTY_PAGE_RECORD; MAX_READER_PAGES],
             page_spine: [0; MAX_READER_PAGES],
             page_count: 0,
+            type_settings: TypeSettings::DEFAULT,
         }
+    }
+
+    pub(crate) fn type_settings(&self) -> TypeSettings {
+        self.type_settings
+    }
+
+    /// Adopt new type settings and drop the in-RAM section window's page
+    /// coverage, so the next open/extend reloads the section under the new
+    /// layout (a size change rebuilds it from the EPUB) instead of serving
+    /// pages paginated under the old one.
+    pub(crate) fn set_type_settings(&mut self, settings: TypeSettings) {
+        if self.type_settings == settings {
+            return;
+        }
+        self.type_settings = settings;
+        self.page_count = 0;
+        self.current_section_page_count = 0;
     }
 
     pub(crate) fn clear_catalog(&mut self) {
@@ -845,6 +864,10 @@ impl ui::reading::ReadingBlocks for ReaderStore {
             .get(index)
             .copied()
             .unwrap_or(true)
+    }
+
+    fn type_settings(&self) -> TypeSettings {
+        self.type_settings
     }
 }
 

@@ -21,6 +21,10 @@ pub async fn run() {
     let mut sleeping = false;
     let mut catalog_refresh_requested = false;
     let mut pending_storage: Option<StorageCommand> = None;
+    // Type settings changed while away from Reading: the loaded section is
+    // paginated under the old layout, so the next entry into Reading must
+    // send an extend even though page and chapter are unchanged.
+    let mut reader_relayout_pending = false;
     let mut opening_book: Option<u32> = None;
     let mut suppress_input_until_open_settled = false;
     let mut block_confirm_until: Option<Instant> = None;
@@ -82,7 +86,23 @@ pub async fn run() {
                 let previous_persisted = state.persisted();
                 state = state.apply_input(ctx, event);
                 let next_persisted = state.persisted();
-                let storage_command = storage_command_for_transition(previous, state);
+                if previous.type_settings() != state.type_settings() {
+                    reader_relayout_pending = true;
+                }
+                let mut storage_command = storage_command_for_transition(previous, state);
+                if storage_command.is_none()
+                    && reader_relayout_pending
+                    && state.view == AppView::Reading
+                {
+                    if let Some(index) = ReaderSource::from_book_id(state.book_id).sd_index() {
+                        storage_command = Some(extend_section_command(state, index));
+                    }
+                }
+                if storage_command.is_some() {
+                    // Open/extend commands carry the current type settings,
+                    // so any dispatched command syncs the reader store.
+                    reader_relayout_pending = false;
+                }
                 if let Some(command) = storage_command {
                     if should_send_storage_immediately(command) {
                         log_storage_command("send", command);
@@ -285,6 +305,7 @@ fn log_storage_command(label: &str, command: StorageCommand) {
             index,
             chapter,
             target_pages,
+            ..
         } => esp_println::println!(
             "app: storage {label} open request={request_id} book_id={book_id} index={index} chapter={chapter} target={target_pages}"
         ),
@@ -294,6 +315,7 @@ fn log_storage_command(label: &str, command: StorageCommand) {
             index,
             chapter,
             target_pages,
+            ..
         } => esp_println::println!(
             "app: storage {label} extend request={request_id} book_id={book_id} index={index} chapter={chapter} target={target_pages}"
         ),
@@ -358,6 +380,7 @@ fn open_book_command(state: ReaderState, index: u8) -> StorageCommand {
         index,
         chapter: state.chapter,
         target_pages: state.page.min(u16::MAX as u32) as u16,
+        type_settings: state.type_settings(),
     }
 }
 
@@ -369,6 +392,7 @@ fn extend_section_command(state: ReaderState, index: u8) -> StorageCommand {
         index,
         chapter: state.chapter,
         target_pages: state.page.min(u16::MAX as u32) as u16,
+        type_settings: state.type_settings(),
     }
 }
 
