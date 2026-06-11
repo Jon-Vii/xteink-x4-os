@@ -174,6 +174,14 @@ pub async fn run(mut epd: Epd, mut sd_cs: Output<'static>) {
                     let _ = POWER_EVENTS.try_send(PowerEvent::DisplayAsleep);
                 }
             }
+            Either::Second(StorageCommand::ReceiveUpload) => {
+                if sync_loaned {
+                    // Diverges: the display task becomes the upload writer
+                    // for the rest of the sync session.
+                    crate::sd_session::upload_session(&mut epd, &mut sd_cs).await;
+                }
+                esp_println::println!("storage: upload refused outside sync");
+            }
             Either::Second(command) => {
                 handle_storage_command(
                     command,
@@ -355,6 +363,10 @@ fn handle_storage_command(
                 sd_library.advertised_page_count(),
                 sd_library.chapter_count_for_ui()
             );
+        }
+        StorageCommand::ReceiveUpload => {
+            // Handled in the task loop before dispatch; reaching here means
+            // the loop refused it already.
         }
         StorageCommand::StoreWifiCredentials(credentials) => {
             let stored = reader_cache::store_wifi_credentials(

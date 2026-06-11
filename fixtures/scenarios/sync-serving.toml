@@ -1,0 +1,20 @@
+# After the exchange the session lingers as a book-upload server; the
+# screen hands out the browser address until done ends the session.
+
+[[steps]]
+button = "Previous"
+
+[[steps]]
+button = "Confirm"
+
+[[steps]]
+sync = "Done"
+pushed = true
+
+[[steps]]
+sync = "Serving"
+ip = [192, 168, 0, 233]
+
+[expect]
+view = "Sync"
+sync_status = "serving"

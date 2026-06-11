@@ -200,6 +200,7 @@ fn parse_sync_event(kind: &str, step: &Step) -> Result<SyncEvent, String> {
             pulled: step.pulled.unwrap_or(false),
         }),
         "PortalUp" | "portal-up" => Ok(SyncEvent::PortalUp),
+        "Serving" | "serving" => Ok(SyncEvent::Serving(step.ip.unwrap_or([192, 168, 0, 233]))),
         "CredentialsSaved" | "credentials-saved" => Ok(SyncEvent::CredentialsSaved),
         "Failed" | "failed" => Ok(SyncEvent::Failed(parse_sync_error(
             step.error.as_deref().unwrap_or("server"),
@@ -230,6 +231,7 @@ fn sync_status_name(status: SyncStatus) -> &'static str {
         SyncStatus::Syncing => "syncing",
         SyncStatus::Done { .. } => "done",
         SyncStatus::PortalUp => "portal-up",
+        SyncStatus::Serving(_) => "serving",
         SyncStatus::CredentialsSaved => "credentials-saved",
         SyncStatus::Error(_) => "error",
     }

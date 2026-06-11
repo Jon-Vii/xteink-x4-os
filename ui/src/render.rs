@@ -349,9 +349,9 @@ fn render_sync(fb: &mut Framebuffer, shell: &UiShell<'_>) {
         UiSyncStatus::Idle => dash_key(fb, 1, "sync", true),
         UiSyncStatus::NotConfigured => dash_key(fb, 1, "set up", true),
         UiSyncStatus::Error(_) => dash_key(fb, 1, "again", true),
-        UiSyncStatus::Done { .. } | UiSyncStatus::CredentialsSaved => {
-            dash_key(fb, 1, "done", true)
-        }
+        UiSyncStatus::Done { .. }
+        | UiSyncStatus::CredentialsSaved
+        | UiSyncStatus::Serving(_) => dash_key(fb, 1, "done", true),
         _ => dash_unused(fb, 1),
     }
     dash_unused(fb, 2);
@@ -434,6 +434,28 @@ fn render_sync(fb: &mut Framebuffer, shell: &UiShell<'_>) {
                 "then enter your wi-fi in the page that opens \u{00b7} http://192.168.4.1",
                 HEADING_CX,
                 382,
+            );
+        }
+        UiSyncStatus::Serving(ip) => {
+            centered_note(fb, "send books from your browser");
+            let mut buf = [0u8; 40];
+            let mut cursor = 0;
+            push_str(&mut buf, &mut cursor, "http://");
+            push_ipv4(&mut buf, &mut cursor, ip);
+            push_str(&mut buf, &mut cursor, "/");
+            draw_text_centered(
+                fb,
+                literata(FontStyle::Regular),
+                text_in(&buf, cursor),
+                HEADING_CX,
+                hint_y,
+            );
+            draw_text_centered(
+                fb,
+                literata_small(FontStyle::Italic),
+                "books appear after the reader restarts \u{00b7} done finishes",
+                HEADING_CX,
+                hint_y + 50,
             );
         }
         UiSyncStatus::CredentialsSaved => {

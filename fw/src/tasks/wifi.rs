@@ -9,9 +9,10 @@
 //! dev-bring-up phase; AP-mode onboarding replaces them later.
 
 use crate::sync_mem::{self, SyncBookInfo, SyncLoan};
+use crate::upload::{sanitized_name, UploadBegin, UploadChunk};
 use crate::{
     StorageCommand, SyncCommand, SyncEvent, STORAGE_COMMANDS, SYNC_COMMANDS, SYNC_EVENTS,
-    SYNC_LOANS,
+    SYNC_LOANS, UPLOAD_BEGINS, UPLOAD_CHUNKS, UPLOAD_RESULTS, UPLOAD_RETURNS,
 };
 use app_core::{PersistedAppState, SyncError, WifiCredentials};
 use embassy_executor::Spawner;
@@ -157,20 +158,250 @@ pub async fn run(spawner: Spawner, wifi: WIFI, systimer: SYSTIMER, rng: RNG, rad
     };
 
     // First Start already consumed; later Starts are Confirm retries
-    // from the error screen.
+    // from the error screen. A completed exchange falls through to the
+    // upload server, which runs until the session's reset.
     loop {
         let event = match session.attempt(creds.ssid(), creds.password()).await {
             Ok(event) => event,
             Err(error) => SyncEvent::Failed(error),
         };
+        let done = matches!(event, SyncEvent::Done { .. });
         send_event(event);
-        // Both arms leave this state: Start retries the session, Exit
-        // resets the device.
+        if done {
+            break;
+        }
+        // Start retries the session, Exit resets the device.
         match SYNC_COMMANDS.receive().await {
             SyncCommand::Start => {}
             SyncCommand::Exit => reset_now(),
         }
     }
+
+    let Session {
+        stack,
+        tcp_rx,
+        tcp_tx,
+        http_a,
+        controller: _controller,
+        ..
+    } = session;
+    let ip = stack
+        .config_v4()
+        .map(|config| config.address.address().octets())
+        .unwrap_or(PORTAL_IP);
+    esp_println::println!("upload: serving at {}.{}.{}.{}", ip[0], ip[1], ip[2], ip[3]);
+    send_event(SyncEvent::Serving(ip));
+    select(
+        park_until_exit(),
+        upload_server(stack, tcp_rx, tcp_tx, http_a),
+    )
+    .await;
+    unreachable!()
+}
+
+// ------------------------------------------------------------------
+// Book upload server
+// ------------------------------------------------------------------
+
+const UPLOAD_PAGE: &str = concat!(
+    "<!doctype html><html><head>",
+    "<meta name=viewport content=\"width=device-width,initial-scale=1\">",
+    "<title>XTEINK X4 \u{00b7} books</title>",
+    "<style>body{font-family:Georgia,serif;margin:2.5em auto;max-width:24em;",
+    "padding:0 1em;color:#222}h1{font-size:1.25em;letter-spacing:.08em}",
+    "input{margin:1em 0}button{font-size:1.05em;padding:.6em 1.6em;",
+    "border:1px solid #222;background:#222;color:#fff;border-radius:4px}",
+    "li{margin:.3em 0}#done{margin-top:1.5em;font-style:italic}",
+    "</style></head><body><h1>XTEINK&nbsp;X4</h1>",
+    "<p>Send EPUB files to the reader's card.</p>",
+    "<input id=files type=file accept=.epub multiple>",
+    "<br><button onclick=go()>Send</button><ul id=log></ul><p id=done></p>",
+    "<script>async function go(){const fs=document.getElementById('files').files;",
+    "const log=document.getElementById('log');",
+    "for(const f of fs){const li=document.createElement('li');",
+    "li.textContent=f.name+' \u{2026}';log.appendChild(li);",
+    "try{const r=await fetch('/upload?name='+encodeURIComponent(f.name),",
+    "{method:'POST',body:f});",
+    "li.textContent=f.name+(r.ok?' \u{2713}':' failed');}",
+    "catch(e){li.textContent=f.name+' failed';}}",
+    "document.getElementById('done').textContent=",
+    "'Press done on the reader; books appear after it restarts.';}",
+    "</script></body></html>",
+);
+
+/// Serves the upload page and streams POSTed books to the display task.
+async fn upload_server(
+    stack: Stack<'static>,
+    tcp_rx: &'static mut [u8],
+    tcp_tx: &'static mut [u8],
+    request_buf: &'static mut [u8],
+) -> ! {
+    // Staging ping-pong buffers live in the loaned heap.
+    let mut pool: heapless::Vec<&'static mut [u8], 2> = heapless::Vec::new();
+    let _ = pool.push(alloc::vec![0u8; 4096].leak());
+    let _ = pool.push(alloc::vec![0u8; 4096].leak());
+    let mut session_started = false;
+
+    loop {
+        let mut socket = TcpSocket::new(stack, &mut *tcp_rx, &mut *tcp_tx);
+        socket.set_timeout(Some(Duration::from_secs(30)));
+        if socket.accept(80).await.is_err() {
+            continue;
+        }
+
+        let mut filled = 0;
+        let head = loop {
+            if filled == request_buf.len() {
+                break None;
+            }
+            let Ok(read) = socket.read(&mut request_buf[filled..]).await else {
+                break None;
+            };
+            if read == 0 {
+                break None;
+            }
+            filled += read;
+            if let Some(head) = captive::parse_request_head(&request_buf[..filled]) {
+                break Some((
+                    head.method.len(),
+                    head.path.len(),
+                    head.content_length,
+                    head.body_start,
+                ));
+            }
+        };
+        let Some((method_len, path_len, content_length, body_start)) = head else {
+            socket.close();
+            continue;
+        };
+        // Reborrow the pieces by index so the buffer stays usable for the
+        // body bytes that arrived with the headers.
+        let path_at = method_len + 1;
+        let is_upload_post = request_buf
+            .get(..method_len)
+            .map(|m| m == b"POST")
+            .unwrap_or(false)
+            && request_buf
+                .get(path_at..path_at + path_len)
+                .map(|p| p.starts_with(b"/upload"))
+                .unwrap_or(false);
+
+        if is_upload_post {
+            let mut name_buf = [0u8; 64];
+            let client_name = request_buf
+                .get(path_at..path_at + path_len)
+                .and_then(|p| {
+                    let query_at = p.iter().position(|b| *b == b'?')? + 1;
+                    captive::form_value(&p[query_at..], "name", &mut name_buf)
+                })
+                .unwrap_or("book.epub");
+            let name = sanitized_name(client_name);
+
+            if !session_started {
+                STORAGE_COMMANDS.send(StorageCommand::ReceiveUpload).await;
+                session_started = true;
+            }
+            let leftover_range = body_start..filled;
+            let ok = stream_book(
+                &mut socket,
+                request_buf,
+                leftover_range,
+                content_length,
+                name,
+                &mut pool,
+            )
+            .await;
+            let _ = write_http_response(
+                &mut socket,
+                if ok {
+                    "200 OK"
+                } else {
+                    "507 Insufficient Storage"
+                },
+                if ok { "stored" } else { "failed" },
+            )
+            .await;
+        } else {
+            let _ = write_http_response(&mut socket, "200 OK", UPLOAD_PAGE).await;
+        }
+        socket.close();
+        let _ = with_timeout(Duration::from_secs(2), socket.flush()).await;
+    }
+}
+
+/// Streams one book body to the display task; true when the card write
+/// succeeded end to end.
+async fn stream_book(
+    socket: &mut TcpSocket<'_>,
+    request_buf: &[u8],
+    leftover: core::ops::Range<usize>,
+    content_length: usize,
+    name: crate::upload::UploadName,
+    pool: &mut heapless::Vec<&'static mut [u8], 2>,
+) -> bool {
+    esp_println::println!("upload: '{}' {} bytes", name, content_length);
+    UPLOAD_BEGINS.send(UploadBegin { name }).await;
+
+    let mut leftover = &request_buf[leftover];
+    if leftover.len() > content_length {
+        leftover = &leftover[..content_length];
+    }
+    let mut remaining = content_length;
+    let mut failed = false;
+    while remaining > 0 && !failed {
+        let buffer = match pool.pop() {
+            Some(buffer) => buffer,
+            None => UPLOAD_RETURNS.receive().await,
+        };
+        let mut len = 0;
+        if !leftover.is_empty() {
+            let take = leftover.len().min(buffer.len());
+            buffer[..take].copy_from_slice(&leftover[..take]);
+            leftover = &leftover[take..];
+            len = take;
+        }
+        while len < buffer.len() && len < remaining {
+            let window = buffer.len().min(remaining);
+            match socket.read(&mut buffer[len..window]).await {
+                Ok(0) | Err(_) => {
+                    failed = true;
+                    break;
+                }
+                Ok(read) => len += read,
+            }
+        }
+        remaining -= len.min(remaining);
+        UPLOAD_CHUNKS
+            .send(UploadChunk {
+                buffer: Some(buffer),
+                len,
+                last: remaining == 0 && !failed,
+                abort: failed,
+            })
+            .await;
+    }
+    if content_length == 0 {
+        // Nothing will flow; tell the writer to finish an empty file.
+        UPLOAD_CHUNKS
+            .send(UploadChunk {
+                buffer: None,
+                len: 0,
+                last: true,
+                abort: true,
+            })
+            .await;
+    }
+    // Refill the pool for the next file.
+    let result = UPLOAD_RESULTS.receive().await;
+    while pool.len() < 2 {
+        match UPLOAD_RETURNS.try_receive() {
+            Ok(buffer) => {
+                let _ = pool.push(buffer);
+            }
+            Err(_) => break,
+        }
+    }
+    result && !failed
 }
 
 // ------------------------------------------------------------------
@@ -387,6 +618,14 @@ async fn write_http_page(
     socket: &mut TcpSocket<'_>,
     body: &str,
 ) -> Result<(), embassy_net::tcp::Error> {
+    write_http_response(socket, "200 OK", body).await
+}
+
+async fn write_http_response(
+    socket: &mut TcpSocket<'_>,
+    status: &str,
+    body: &str,
+) -> Result<(), embassy_net::tcp::Error> {
     let mut length = [0u8; 8];
     let mut at = length.len();
     let mut value = body.len();
@@ -398,11 +637,9 @@ async fn write_http_page(
             break;
         }
     }
-    write_all(
-        socket,
-        b"HTTP/1.1 200 OK\r\ncontent-type: text/html\r\ncontent-length: ",
-    )
-    .await?;
+    write_all(socket, b"HTTP/1.1 ").await?;
+    write_all(socket, status.as_bytes()).await?;
+    write_all(socket, b"\r\ncontent-type: text/html\r\ncontent-length: ").await?;
     write_all(socket, &length[at..]).await?;
     write_all(socket, b"\r\nconnection: close\r\n\r\n").await?;
     write_all(socket, body.as_bytes()).await

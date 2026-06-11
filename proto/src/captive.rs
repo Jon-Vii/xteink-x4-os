@@ -184,7 +184,11 @@ pub fn dns_answer(query: &[u8], portal_ip: [u8; 4], out: &mut [u8]) -> Option<us
     }
     let qtype = u16::from_be_bytes([*query.get(at)?, *query.get(at + 1)?]);
     let question_end = at + 4;
-    let answers = if qtype == 1 || qtype == 255 { 1u16 } else { 0u16 };
+    let answers = if qtype == 1 || qtype == 255 {
+        1u16
+    } else {
+        0u16
+    };
 
     let answer_len = question_end + usize::from(answers) * 16;
     if out.len() < answer_len {
@@ -216,6 +220,43 @@ pub struct HttpRequest<'a> {
     pub method: &'a str,
     pub path: &'a str,
     pub body: &'a [u8],
+}
+
+/// A request line plus headers, before the body has arrived: what a
+/// streaming upload needs. `body_start` indexes into the raw buffer;
+/// bytes past it belong to the body.
+pub struct HttpRequestHead<'a> {
+    pub method: &'a str,
+    pub path: &'a str,
+    pub content_length: usize,
+    pub body_start: usize,
+}
+
+/// Parses once the header terminator is present; `None` means keep
+/// reading.
+pub fn parse_request_head(raw: &[u8]) -> Option<HttpRequestHead<'_>> {
+    let headers_end = raw.windows(4).position(|window| window == b"\r\n\r\n")? + 4;
+    let head = core::str::from_utf8(&raw[..headers_end]).ok()?;
+    let mut request_line = head.lines().next()?.split(' ');
+    let method = request_line.next()?;
+    let path = request_line.next()?;
+    let content_length = head
+        .lines()
+        .find_map(|line| {
+            let (name, value) = line.split_once(':')?;
+            if name.eq_ignore_ascii_case("content-length") {
+                value.trim().parse::<usize>().ok()
+            } else {
+                None
+            }
+        })
+        .unwrap_or(0);
+    Some(HttpRequestHead {
+        method,
+        path,
+        content_length,
+        body_start: headers_end,
+    })
 }
 
 /// Splits a buffered request once the header/body boundary and declared
@@ -426,6 +467,18 @@ mod tests {
             form_value(request.body, "pass", &mut pass_buf),
             Some("a&b c/")
         );
+    }
+
+    #[test]
+    fn parses_streaming_head_before_body() {
+        let raw =
+            b"POST /upload?name=The%20Hobbit.epub HTTP/1.1\r\nContent-Length: 1048576\r\n\r\nPK..";
+        let head = parse_request_head(raw).unwrap();
+        assert_eq!(head.method, "POST");
+        assert_eq!(head.path, "/upload?name=The%20Hobbit.epub");
+        assert_eq!(head.content_length, 1_048_576);
+        assert_eq!(&raw[head.body_start..], b"PK..");
+        assert!(parse_request_head(b"POST /upload HTTP/1.1\r\nContent-").is_none());
     }
 
     #[test]

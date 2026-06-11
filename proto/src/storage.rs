@@ -71,6 +71,18 @@ pub trait ProgressStorage {
 }
 
 pub fn is_epub_path(path: &str) -> bool {
+    // Uploads are written with 8.3 names, where the extension truncates
+    // to ".epu"; accept both spellings everywhere EPUBs are discovered.
+    if path.len() >= 4 {
+        let tail = &path.as_bytes()[path.len() - 4..];
+        if tail[0] == b'.'
+            && tail[1].eq_ignore_ascii_case(&b'e')
+            && tail[2].eq_ignore_ascii_case(&b'p')
+            && tail[3].eq_ignore_ascii_case(&b'u')
+        {
+            return true;
+        }
+    }
     path.as_bytes()
         .windows(5)
         .last()

@@ -355,6 +355,9 @@ fn log_storage_command(label: &str, command: StorageCommand) {
         StorageCommand::StoreWifiCredentials(_) => {
             esp_println::println!("app: storage {label} wifi credentials")
         }
+        StorageCommand::ReceiveUpload => {
+            esp_println::println!("app: storage {label} receive upload")
+        }
     }
 }
 

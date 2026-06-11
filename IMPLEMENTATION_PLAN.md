@@ -225,9 +225,16 @@ Current code status:
   credentials persist through StoreWifiCredentials into /XTEINK/WIFI.BIN
   and the next session joins as a station. Join QR baked by
   tools/generate_qr.py. Stack region after the portal: ~38.9 KB.
-- Next: browser EPUB upload through the same portal HTTP server in bounded
-  chunks written by the board I/O task, kosync account onboarding via the
-  same form, and TLS for the official sync server.
+- Browser EPUB upload implemented (pending hardware validation): after the
+  kosync exchange the session keeps serving at the device's LAN address
+  (SyncStatus::Serving screen hands out the URL); POST /upload streams raw
+  EPUB bytes through a two-buffer ping-pong into the display task, which
+  holds one SD session for the upload phase and writes /BOOKS/<8.3>.EPU
+  (the catalog filter accepts .epu alongside .epub). Books appear after the
+  session-ending reset's rescan. Stack region ~36.7 KB after the upload
+  futures; the EPUB-open chain's ~30 KB watermark is the floor to respect.
+- Next: kosync account onboarding via the portal form, and TLS for the
+  official sync server.
 
 ## Verification commands
 

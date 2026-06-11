@@ -317,6 +317,17 @@ fn push_prefixed(
 
 fn is_epub_name(name: &str) -> bool {
     let bytes = name.as_bytes();
+    // Uploaded books carry 8.3 names whose extension truncates to ".epu".
+    if bytes.len() >= 4 {
+        let tail = &bytes[bytes.len() - 4..];
+        if tail[0] == b'.'
+            && tail[1].eq_ignore_ascii_case(&b'e')
+            && tail[2].eq_ignore_ascii_case(&b'p')
+            && tail[3].eq_ignore_ascii_case(&b'u')
+        {
+            return true;
+        }
+    }
     if bytes.len() >= 5 {
         let ext = &bytes[bytes.len() - 5..];
         if ext[0] == b'.'

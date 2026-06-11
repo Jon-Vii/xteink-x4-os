@@ -1,8 +1,10 @@
 use crate::display_flush::Epd;
+use crate::upload::{UploadBegin, UploadChunk};
+use crate::{UPLOAD_BEGINS, UPLOAD_CHUNKS, UPLOAD_RESULTS, UPLOAD_RETURNS};
 use embedded_hal::delay::DelayNs;
 use embedded_hal::digital::OutputPin;
 use embedded_hal::spi::{Operation, SpiBus as BlockingSpiBus, SpiDevice};
-use embedded_sdmmc::{Directory, SdCard, TimeSource, Timestamp, VolumeIdx, VolumeManager};
+use embedded_sdmmc::{Directory, Mode, SdCard, TimeSource, Timestamp, VolumeIdx, VolumeManager};
 use esp_hal::gpio::Output;
 use esp_hal::spi::master::{Config as SpiConfig, SpiDmaBus};
 use esp_hal::time::RateExtU32;
@@ -237,4 +239,140 @@ pub(crate) fn with_root<R>(
         .spi_mut()
         .apply_config(&SpiConfig::default().with_frequency(DISPLAY_FREQ_MHZ.MHz()));
     result
+}
+
+/// The upload phase: one SD session held open for the rest of the sync
+/// session, writing browser-sent books to /BOOKS as they stream in.
+/// Diverges by design — only the session-ending reset leaves it, so the
+/// display task must not be needed for anything else once this starts.
+pub(crate) async fn upload_session(epd: &mut Epd, sd_cs: &mut Output<'static>) -> ! {
+    epd.deselect_display();
+    sd_cs.set_high();
+    esp_println::println!("upload: session enter");
+
+    {
+        let spi = epd.spi_mut();
+        let _ = spi.apply_config(&SpiConfig::default().with_frequency(SD_IDENT_FREQ_KHZ.kHz()));
+        let mut wake = [0xFFu8; 10];
+        let _ = BlockingSpiBus::transfer_in_place(spi, &mut wake);
+        let _ = BlockingSpiBus::flush(spi);
+    }
+
+    let spi = SdSpiDevice {
+        spi: epd.spi_mut(),
+        cs: sd_cs,
+        delay: SdDelay,
+    };
+    let card = SdCard::new(spi, SdDelay);
+    if card.num_bytes().is_err() {
+        esp_println::println!("upload: card init failed");
+        refuse_uploads_forever().await;
+    }
+    card.spi(|device| {
+        let _ = device
+            .spi
+            .apply_config(&SpiConfig::default().with_frequency(SD_DATA_FREQ_MHZ.MHz()));
+    });
+    let volume_mgr: VolumeManager<_, _, 8, 8, 1> =
+        VolumeManager::new_with_limits(card, StaticTime, 5000);
+    let Ok(volume) = volume_mgr.open_volume(VolumeIdx(0)) else {
+        esp_println::println!("upload: volume open failed");
+        refuse_uploads_forever().await;
+    };
+    let raw_volume = volume.to_raw_volume();
+    let Ok(raw_root) = volume_mgr.open_root_dir(raw_volume) else {
+        esp_println::println!("upload: root open failed");
+        refuse_uploads_forever().await;
+    };
+    let root = Directory::new(raw_root, &volume_mgr);
+    let books = match root.open_dir("BOOKS") {
+        Ok(books) => books,
+        Err(_) => match root.make_dir_in_dir("BOOKS") {
+            Ok(()) => match root.open_dir("BOOKS") {
+                Ok(books) => books,
+                Err(_) => refuse_uploads_forever().await,
+            },
+            Err(_) => refuse_uploads_forever().await,
+        },
+    };
+
+    loop {
+        let begin = UPLOAD_BEGINS.receive().await;
+        let ok = write_one_book(&books, &begin).await;
+        esp_println::println!("upload: '{}' ok={}", begin.name, ok);
+        UPLOAD_RESULTS.send(ok).await;
+    }
+}
+
+async fn write_one_book<
+    D,
+    T,
+    const MAX_DIRS: usize,
+    const MAX_FILES: usize,
+    const MAX_VOLUMES: usize,
+>(
+    books: &Directory<'_, D, T, MAX_DIRS, MAX_FILES, MAX_VOLUMES>,
+    begin: &UploadBegin,
+) -> bool
+where
+    D: embedded_sdmmc::BlockDevice,
+    T: TimeSource,
+{
+    let Ok(file) = books.open_file_in_dir(begin.name.as_str(), Mode::ReadWriteCreateOrTruncate)
+    else {
+        drain_until_end().await;
+        return false;
+    };
+    let mut failed = false;
+    let mut aborted = false;
+    loop {
+        let chunk = UPLOAD_CHUNKS.receive().await;
+        if !failed && !chunk.abort {
+            if let Some(buffer) = &chunk.buffer {
+                if file.write(&buffer[..chunk.len.min(buffer.len())]).is_err() {
+                    failed = true;
+                }
+            }
+        }
+        let last = chunk.last;
+        aborted |= chunk.abort;
+        recycle(chunk).await;
+        if last || aborted {
+            break;
+        }
+    }
+    drop(file);
+    if failed || aborted {
+        let _ = books.delete_file_in_dir(begin.name.as_str());
+        return false;
+    }
+    true
+}
+
+/// Consumes one file's worth of chunks without a file to write into.
+async fn drain_until_end() {
+    loop {
+        let chunk = UPLOAD_CHUNKS.receive().await;
+        let done = chunk.last || chunk.abort;
+        recycle(chunk).await;
+        if done {
+            return;
+        }
+    }
+}
+
+async fn recycle(chunk: UploadChunk) {
+    if let Some(buffer) = chunk.buffer {
+        UPLOAD_RETURNS.send(buffer).await;
+    }
+}
+
+/// Setup failed: answer every upload attempt with failure, forever; the
+/// session ends with the reset like everything else in sync mode.
+async fn refuse_uploads_forever() -> ! {
+    loop {
+        let _ = UPLOAD_BEGINS.receive().await;
+        drain_until_end().await;
+        UPLOAD_RESULTS.send(false).await;
+    }
 }

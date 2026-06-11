@@ -294,6 +294,7 @@ impl Emulator {
             Some(StorageCommand::StoreProgress(_)) => Some("StoreProgress"),
             Some(StorageCommand::LoanSyncMemory) => Some("LoanSyncMemory"),
             Some(StorageCommand::StoreWifiCredentials(_)) => Some("StoreWifiCredentials"),
+            Some(StorageCommand::ReceiveUpload) => Some("ReceiveUpload"),
             None => None,
         }
     }

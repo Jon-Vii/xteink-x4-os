@@ -287,6 +287,10 @@ pub enum StorageCommand {
     /// /XTEINK/WIFI.BIN. Allowed during a sync session: it is the portal
     /// that sends it.
     StoreWifiCredentials(WifiCredentials),
+    /// Enter the upload session: the display task parks on the upload
+    /// channels and writes browser-sent books to /BOOKS until the
+    /// session's reset. Sent by the wifi task at the first upload.
+    ReceiveUpload,
 }
 
 /// Station credentials as a bounded Copy message: what the onboarding
@@ -383,6 +387,9 @@ pub enum SyncStatus {
     },
     /// The onboarding hotspot is up; the screen shows the join QR.
     PortalUp,
+    /// The exchange finished and the upload server answers at this
+    /// address until the session ends.
+    Serving([u8; 4]),
     /// The portal captured and stored credentials; a fresh session will
     /// use them after the reset.
     CredentialsSaved,
@@ -407,6 +414,7 @@ pub enum SyncEvent {
     Syncing,
     Done { pushed: bool, pulled: bool },
     PortalUp,
+    Serving([u8; 4]),
     CredentialsSaved,
     Failed(SyncError),
 }
@@ -788,6 +796,7 @@ impl ReaderState {
             SyncEvent::Syncing => SyncStatus::Syncing,
             SyncEvent::Done { pushed, pulled } => SyncStatus::Done { pushed, pulled },
             SyncEvent::PortalUp => SyncStatus::PortalUp,
+            SyncEvent::Serving(ip) => SyncStatus::Serving(ip),
             SyncEvent::CredentialsSaved => SyncStatus::CredentialsSaved,
             SyncEvent::Failed(error) => SyncStatus::Error(error),
         };
@@ -1039,6 +1048,25 @@ mod tests {
         let state = state.apply_sync_event(SyncEvent::CredentialsSaved);
         assert_eq!(state.sync_status, SyncStatus::CredentialsSaved);
         let state = press(state, Button::Confirm);
+        assert_eq!(state.view, AppView::Home);
+    }
+
+    #[test]
+    fn sync_serving_state_follows_done_and_back_exits() {
+        let ctx = CTX.with_sync_credentials(true);
+        let state = ReaderState::boot()
+            .apply_input(ctx, InputEvent::button(Button::Previous))
+            .apply_input(ctx, InputEvent::button(Button::Confirm))
+            .apply_sync_event(SyncEvent::Done {
+                pushed: true,
+                pulled: false,
+            })
+            .apply_sync_event(SyncEvent::Serving([192, 168, 0, 233]));
+        assert_eq!(state.sync_status, SyncStatus::Serving([192, 168, 0, 233]));
+        // Confirm is inert while serving; Back leaves for Home.
+        let held = state.apply_input(ctx, InputEvent::button(Button::Confirm));
+        assert_eq!(held.sync_status, SyncStatus::Serving([192, 168, 0, 233]));
+        let state = state.apply_input(ctx, InputEvent::button(Button::Back));
         assert_eq!(state.view, AppView::Home);
     }
 
