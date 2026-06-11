@@ -192,11 +192,28 @@ pub async fn run(spawner: Spawner, wifi: WIFI, systimer: SYSTIMER, rng: RNG, rad
     esp_println::println!("upload: serving at {}.{}.{}.{}", ip[0], ip[1], ip[2], ip[3]);
     send_event(SyncEvent::Serving(ip));
     select(
-        park_until_exit(),
+        exit_after_uploads(),
         upload_server(stack, tcp_rx, tcp_tx, http_a),
     )
     .await;
     unreachable!()
+}
+
+/// Exit during the serving phase defers the reset until any in-flight
+/// book finishes writing (bounded), so a done press cannot truncate it.
+async fn exit_after_uploads() -> ! {
+    loop {
+        if let SyncCommand::Exit = SYNC_COMMANDS.receive().await {
+            let mut waited_ms = 0u32;
+            while crate::upload::UPLOAD_IN_FLIGHT.load(portable_atomic::Ordering::SeqCst)
+                && waited_ms < 120_000
+            {
+                Timer::after_millis(100).await;
+                waited_ms += 100;
+            }
+            reset_now();
+        }
+    }
 }
 
 // ------------------------------------------------------------------
@@ -287,14 +304,15 @@ async fn upload_server(
                 .unwrap_or(false);
 
         if is_upload_post {
-            let mut name_buf = [0u8; 64];
             let client_name = request_buf
                 .get(path_at..path_at + path_len)
                 .and_then(|p| {
                     let query_at = p.iter().position(|b| *b == b'?')? + 1;
-                    captive::form_value(&p[query_at..], "name", &mut name_buf)
+                    p[query_at..]
+                        .split(|b| *b == b'&')
+                        .find_map(|pair| pair.strip_prefix(b"name="))
                 })
-                .unwrap_or("book.epub");
+                .unwrap_or(b"book");
             let name = sanitized_name(client_name);
 
             if !session_started {
@@ -340,6 +358,7 @@ async fn stream_book(
     pool: &mut heapless::Vec<&'static mut [u8], 2>,
 ) -> bool {
     esp_println::println!("upload: '{}' {} bytes", name, content_length);
+    crate::upload::UPLOAD_IN_FLIGHT.store(true, portable_atomic::Ordering::SeqCst);
     UPLOAD_BEGINS.send(UploadBegin { name }).await;
 
     let mut leftover = &request_buf[leftover];
@@ -393,6 +412,7 @@ async fn stream_book(
     }
     // Refill the pool for the next file.
     let result = UPLOAD_RESULTS.receive().await;
+    crate::upload::UPLOAD_IN_FLIGHT.store(false, portable_atomic::Ordering::SeqCst);
     while pool.len() < 2 {
         match UPLOAD_RETURNS.try_receive() {
             Ok(buffer) => {

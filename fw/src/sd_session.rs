@@ -285,6 +285,12 @@ pub(crate) async fn upload_session(epd: &mut Epd, sd_cs: &mut Output<'static>) -
         refuse_uploads_forever().await;
     };
     let root = Directory::new(raw_root, &volume_mgr);
+    // New books invalidate the catalog snapshot: the next boot's cache
+    // load misses and runs a full scan, which is how uploads surface.
+    if let Ok(xteink) = root.open_dir("XTEINK") {
+        let _ = xteink.delete_file_in_dir("CATALOG.BIN");
+        esp_println::println!("upload: catalog snapshot invalidated");
+    }
     let books = match root.open_dir("BOOKS") {
         Ok(books) => books,
         Err(_) => match root.make_dir_in_dir("BOOKS") {

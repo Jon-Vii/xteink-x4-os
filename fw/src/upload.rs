@@ -7,6 +7,12 @@
 //! one SD session for the whole upload phase and writes /BOOKS/<8.3>.
 
 use heapless::String;
+// riscv32imc has no CAS; portable-atomic provides it on single-core.
+use portable_atomic::AtomicBool;
+
+/// True while a book body is streaming; the session-ending reset waits
+/// for it so a done press cannot truncate a file mid-write.
+pub static UPLOAD_IN_FLIGHT: AtomicBool = AtomicBool::new(false);
 
 /// 8.3 names cap at twelve characters.
 pub type UploadName = String<12>;
@@ -23,16 +29,19 @@ pub struct UploadChunk {
     pub abort: bool,
 }
 
-/// Derives an 8.3 upload name from a browser filename: keep the first
-/// eight ASCII alphanumerics uppercased, default to BOOK, extension
-/// `.EPU` (which the catalog scan accepts alongside `.epub`).
-pub fn sanitized_name(client_name: &str) -> UploadName {
-    let stem_source = client_name
-        .rsplit_once('.')
-        .map(|(stem, _ext)| stem)
-        .unwrap_or(client_name);
+/// Derives an 8.3 upload name from raw (still percent-encoded) filename
+/// bytes: keep the first eight ASCII alphanumerics uppercased, default
+/// to BOOK, extension `.EPU` (which the catalog scan accepts alongside
+/// `.epub`). Working on raw bytes sidesteps any decode-buffer limit;
+/// percent escapes simply contribute their hex letters.
+pub fn sanitized_name(client_name: &[u8]) -> UploadName {
+    let stem_end = client_name
+        .iter()
+        .rposition(|byte| *byte == b'.')
+        .unwrap_or(client_name.len());
+    let stem_source = client_name[..stem_end].iter().copied();
     let mut name = UploadName::new();
-    for byte in stem_source.bytes() {
+    for byte in stem_source {
         if name.len() == 8 {
             break;
         }
