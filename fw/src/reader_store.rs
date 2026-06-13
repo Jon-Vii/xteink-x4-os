@@ -392,6 +392,16 @@ impl ReaderStore {
         self.blocks.len()
     }
 
+    /// True once the section text arena has less than one max-length line of
+    /// headroom left. The streaming builder flushes the section here so the
+    /// next line lands in a fresh chunk; without this the arena overflows
+    /// and `push_line_block` starts silently dropping the rest of the
+    /// chapter (text is the tightest of the three section budgets, hit long
+    /// before the page or block caps).
+    pub(crate) fn text_capacity_reached(&self) -> bool {
+        self.text_len + MAX_READER_BLOCK_TEXT > self.text.len()
+    }
+
     pub(crate) fn block_count(&self) -> usize {
         self.block_count
     }

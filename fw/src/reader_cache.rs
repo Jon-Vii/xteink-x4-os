@@ -1272,6 +1272,7 @@ where
         );
         if self.library.page_count >= self.target_pages
             || self.library.block_count() >= self.library.block_capacity().saturating_sub(4)
+            || self.library.text_capacity_reached()
         {
             flush_styled_preview_line(self, false);
             self.flush_section(false);
@@ -1504,14 +1505,30 @@ fn flush_styled_preview_line<
             sink.generated_toc_for_spine = true;
         }
     }
-    let _ = sink.library.push_line_block(
+    if !sink.library.push_line_block(
         line.as_str(),
         style,
         role,
         align,
         paragraph_end,
         sink.spine_index,
-    );
+    ) {
+        // The section arena (text bytes or the block table) just filled.
+        // Flush what we have to a section file and retry the line into a
+        // fresh arena, so a long chapter chunks and continues instead of
+        // losing its tail. (At the book-wide section ceiling flush_section
+        // refuses and sets book_partial; the line is then genuinely
+        // dropped, which is the separate whole-book limit.)
+        sink.flush_section(false);
+        let _ = sink.library.push_line_block(
+            line.as_str(),
+            style,
+            role,
+            align,
+            paragraph_end,
+            sink.spine_index,
+        );
+    }
     sink.line.clear();
     sink.line_ink = StyledInkCursor::new(sink.library.type_settings(), FontStyle::Regular);
     sink.line_style = FontStyle::Regular;
