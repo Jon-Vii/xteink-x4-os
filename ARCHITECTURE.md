@@ -200,7 +200,11 @@ the user-facing view is always drawn from the latest already-owned snapshot.
 SD/FAT access goes through an SD session: the board I/O task deselects the
 display, clocks the bus down for the card (400 kHz identification with wake
 clocks, then 20 MHz data), opens the FAT root, performs one storage action, and
-restores 40 MHz display SPI before returning to EPD work.
+restores 40 MHz display SPI before returning to EPD work. The card stays powered
+between sessions while the device is awake, so only the first session runs the
+full CMD0/ACMD41 init; later ones reuse the remembered card type and skip the
+handshake, falling back to a cold init if a reused session cannot open the
+volume. Deep sleep resets the chip and clears that state.
 
 ## Display model
 
@@ -292,9 +296,11 @@ and the host preview tool:
 - `EpubPackage` for container/OPF metadata, manifest, and spine.
 - `xhtml_blocks_to_sink` with `TextRole`, `FontStyle`, and `TextAlign` as the
   single XHTML extraction path feeding bounded block records.
-- `BookCacheHeader`, `SectionHeader`, `PageCacheHeader`, `TocRecord`,
-  `PageRecord`, `LineRecord`, `WordRecord`, and `BlockRecord` for bounded binary
-  cache records used by firmware and preview pagination.
+- `BookV2Header` with `BookV2SectionRecord`, and `SectionV2Header` with
+  `PageRecord`, `BlockRecord`, and `TocRecord`, for the bounded binary cache
+  records the firmware reads and writes. The earlier `BookCacheHeader`,
+  `SectionHeader`, `PageCacheHeader`, `LineRecord`, and `WordRecord` remain in
+  `proto::cache` only for the disabled V1 migration path.
 
 The firmware still ships one built-in catalog entry as a fallback, but the
 board I/O task owns the shared SPI bus while it scans FAT16/FAT32
@@ -305,11 +311,28 @@ board-I/O owner.
 
 ## SD-backed reader cache
 
-The SD reader uses a hybrid-light cache. Opening an EPUB parses OPF/TOC/spine,
-writes a flat book index, and builds the first chunk of the requested section.
-When the user nears the cached end, the app requests a larger target
-page count and the section cache is rebuilt/extended before rendering the next
-page. Chapter jumps build the requested chapter section on demand.
+The SD reader uses a V2 whole-book cache. Opening an EPUB parses OPF/TOC/spine,
+then builds the whole book up front: every spine item paginates into one or more
+fixed-size sections, each section is written to its own file, and a book index
+records where each section sits. After that the book reopens from cache in tens
+of milliseconds; only the first build of a large book is slow (minutes for
+something HPMOR-sized).
+
+A chapter is a spine item, and a long one paginates into several sections. The
+builder closes the current section and opens the next when its in-RAM arena
+fills, where the text budget (16 KB) is the binding limit for prose, well ahead
+of the block (384) and page (96) caps. Sections are invisible while reading: the
+reader walks across them seamlessly, and the footer page-in-chapter counter
+aggregates every section sharing a spine. The book index holds up to
+`MAX_BOOK_SECTIONS` (320, on the order of 4,500 pages); a longer book caches
+`partial`.
+
+Each section header carries a `font_config` that packs `READER_LAYOUT_VERSION`
+with the type size and spacing it was paginated under. A loaded section whose
+version or size no longer matches is invalid and forces a rebuild, so bumping
+`READER_LAYOUT_VERSION` retires every stale cache after a layout or
+cache-encoding change; a spacing-only change re-walks line heights without a
+reparse.
 
 Cache paths use FAT 8.3-safe names because `embedded-sdmmc` operates on short
 file names in the firmware path. The library list is a separate flat catalog
@@ -320,18 +343,19 @@ storage command. Files renders the current snapshot immediately. It may show
 only after a completed scan proves the card has no EPUBs.
 
 ```text
-/XTEINK/CACHE/E<hash>/BOOK.BIN
-/XTEINK/CACHE/E<hash>/COVER.BIN
-/XTEINK/CACHE/E<hash>/SECTIONS/S000.BIN
-/XTEINK/CACHE/E<hash>/SECTIONS/S001.BIN
+/XTEINK/CACHE2/E<hash>/BOOK.BIN
+/XTEINK/CACHE2/E<hash>/COVER.BIN
+/XTEINK/CACHE2/E<hash>/SECTIONS/S000.BIN
+/XTEINK/CACHE2/E<hash>/SECTIONS/S001.BIN
 /XTEINK/STATE.BIN
 ```
 
-`BOOK.BIN` contains a `BookCacheHeader`, spine records, TOC records, and a shared
-string blob for title, author, source path, hrefs, and TOC titles. Section files
-contain a `SectionHeader`, page records, block records, paragraph flags, and the
-UTF-8 text blob for the cached rendered page chunk. The active firmware state
-keeps only loaded book metadata, active section page records, block records,
+`BOOK.BIN` holds a `BookV2Header`, one `BookV2SectionRecord` per section (spine,
+start page, page count, partial), TOC records, and a string blob for title,
+author, and TOC titles. Section files hold a `SectionV2Header`, page records,
+block records, per-block paragraph flags, and the UTF-8 text blob of that
+section's pre-wrapped lines. The active firmware state keeps only loaded book
+metadata, the full section index, the active section's page/block records and
 text bytes, and small ZIP/XML scratch buffers. Spine XHTML members of any size
 stream completely through the resumable block parser in bounded inflate
 windows, so chapter content is never truncated by scratch-buffer limits. `STATE.BIN`
@@ -387,17 +411,17 @@ cargo run --manifest-path tools/emulator/Cargo.toml --target aarch64-apple-darwi
 
 The firmware now has the e-reader surfaces as explicit app state:
 
-- `Home`: current book cover/metadata plus Continue, Library, and Settings.
+- `Home`: current book cover/metadata plus Continue, Library, Sync, and Settings.
 - `Library`: selects a book or opens settings.
 - `Reading`: owns the active book/page position.
 - `Chapters`: selects a chapter within the current book.
 - `Settings`: cycles orientation and refresh policy.
 
-The interface is split by context. Device/navigation surfaces (`Home`,
-`Library`, `Settings`) render in portrait because covers, lists, and settings are
-naturally vertical. Book surfaces (`Reading`, `Chapters`) stay in landscape for
-the current reading posture. Home is cover-led: the current book is the visual
-anchor, with a restrained bottom tab strip for Read, Library, and Settings.
+Every surface renders in landscape: the X4 is held that way for its side page
+buttons, so `Home`, `Library`, and `Settings` share the reading posture rather
+than rotating into portrait. Home is cover-led: the current book is the visual
+anchor, with a restrained menu down the side for Continue, Library, Sync, and
+Settings.
 Reading mode keeps the page quiet: tiny book title, rendered-screen count within
 the chapter, symbolic battery, and a thin whole-book progress bar. Home shows a
 small battery percentage because it is a status surface. GPIO0 is sampled as the
