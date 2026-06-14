@@ -33,6 +33,17 @@ pub const COVER_WIDTH: usize = 202;
 pub const COVER_HEIGHT: usize = 303;
 pub const COVER_STRIDE: usize = COVER_WIDTH.div_ceil(8);
 pub const COVER_BYTES: usize = COVER_STRIDE * COVER_HEIGHT;
+/// Chapter list (TOC) cache, kept on disk so the full table of contents
+/// never has to be resident -- a long book's TOC (HPMOR's runs to a couple
+/// hundred entries) would otherwise blow the tight reader RAM budget. Fixed
+/// 48-byte records keep it randomly addressable: chapter `i` lives at
+/// `TOC_FILE_HEADER_BYTES + i * TOC_CHAPTER_RECORD_BYTES`.
+pub const CACHE_TOC_FILE: &str = "TOC.BIN";
+pub const TOC_FILE_MAGIC: u32 = 0x5834_5443; // X4TC
+pub const TOC_FILE_VERSION: u16 = 1;
+pub const TOC_FILE_HEADER_BYTES: usize = 16;
+pub const TOC_CHAPTER_TITLE_BYTES: usize = 44;
+pub const TOC_CHAPTER_RECORD_BYTES: usize = 48;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CacheError {
@@ -653,6 +664,91 @@ pub fn decode_cover_header(input: &[u8]) -> Result<CoverCacheHeader, CacheError>
     Ok(header)
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct TocFileHeader {
+    pub source_hash: u32,
+    pub source_size: u32,
+    pub chapter_count: u16,
+}
+
+#[derive(Clone, Copy)]
+pub struct TocChapterRecord {
+    pub spine_index: i16,
+    pub level: u8,
+    pub title_len: u8,
+    pub title: [u8; TOC_CHAPTER_TITLE_BYTES],
+}
+
+impl TocChapterRecord {
+    pub fn title_str(&self) -> &str {
+        let len = (self.title_len as usize).min(TOC_CHAPTER_TITLE_BYTES);
+        core::str::from_utf8(&self.title[..len]).unwrap_or("")
+    }
+}
+
+/// Build a record from a title, truncating to the title budget on a UTF-8
+/// char boundary so `title_str` always decodes.
+pub fn toc_chapter_record(title: &str, level: u8, spine_index: i16) -> TocChapterRecord {
+    let mut len = title.len().min(TOC_CHAPTER_TITLE_BYTES);
+    while len > 0 && !title.is_char_boundary(len) {
+        len -= 1;
+    }
+    let mut buf = [0u8; TOC_CHAPTER_TITLE_BYTES];
+    buf[..len].copy_from_slice(&title.as_bytes()[..len]);
+    TocChapterRecord {
+        spine_index,
+        level,
+        title_len: len as u8,
+        title: buf,
+    }
+}
+
+pub fn encode_toc_file_header(header: TocFileHeader, out: &mut [u8]) -> Result<usize, CacheError> {
+    require(out, TOC_FILE_HEADER_BYTES)?;
+    write_u32(out, 0, TOC_FILE_MAGIC);
+    write_u16(out, 4, TOC_FILE_VERSION);
+    write_u16(out, 6, header.chapter_count);
+    write_u32(out, 8, header.source_hash);
+    write_u32(out, 12, header.source_size);
+    Ok(TOC_FILE_HEADER_BYTES)
+}
+
+pub fn decode_toc_file_header(input: &[u8]) -> Result<TocFileHeader, CacheError> {
+    require(input, TOC_FILE_HEADER_BYTES)?;
+    if read_u32(input, 0)? != TOC_FILE_MAGIC {
+        return Err(CacheError::BadMagic);
+    }
+    if read_u16(input, 4)? != TOC_FILE_VERSION {
+        return Err(CacheError::BadVersion);
+    }
+    Ok(TocFileHeader {
+        chapter_count: read_u16(input, 6)?,
+        source_hash: read_u32(input, 8)?,
+        source_size: read_u32(input, 12)?,
+    })
+}
+
+pub fn encode_toc_chapter(record: &TocChapterRecord, out: &mut [u8]) -> Result<usize, CacheError> {
+    require(out, TOC_CHAPTER_RECORD_BYTES)?;
+    write_i16(out, 0, record.spine_index);
+    out[2] = record.level;
+    out[3] = record.title_len;
+    out[4..4 + TOC_CHAPTER_TITLE_BYTES].copy_from_slice(&record.title);
+    Ok(TOC_CHAPTER_RECORD_BYTES)
+}
+
+pub fn decode_toc_chapter(input: &[u8]) -> Result<TocChapterRecord, CacheError> {
+    require(input, TOC_CHAPTER_RECORD_BYTES)?;
+    let mut title = [0u8; TOC_CHAPTER_TITLE_BYTES];
+    title.copy_from_slice(&input[4..4 + TOC_CHAPTER_TITLE_BYTES]);
+    Ok(TocChapterRecord {
+        spine_index: read_i16(input, 0)?,
+        level: input[2],
+        title_len: input[3],
+        title,
+    })
+}
+
 fn require(slice: &[u8], len: usize) -> Result<(), CacheError> {
     if slice.len() < len {
         Err(CacheError::BufferTooSmall)
@@ -1078,5 +1174,35 @@ mod tests {
         bytes[0] = b'X';
         bytes[9] = 1;
         assert_eq!(decode_cover_header(&bytes), Err(CacheError::BadLength));
+    }
+
+    #[test]
+    fn toc_chapter_records_round_trip_and_truncate() {
+        let header = TocFileHeader {
+            source_hash: 0xABCD_1234,
+            source_size: 1_726_241,
+            chapter_count: 242,
+        };
+        let mut header_bytes = [0u8; TOC_FILE_HEADER_BYTES];
+        encode_toc_file_header(header, &mut header_bytes).expect("toc header encodes");
+        assert_eq!(decode_toc_file_header(&header_bytes).unwrap(), header);
+
+        // A short title survives a round-trip intact.
+        let short = toc_chapter_record("Chapter 12", 1, 45);
+        let mut bytes = [0u8; TOC_CHAPTER_RECORD_BYTES];
+        encode_toc_chapter(&short, &mut bytes).expect("toc record encodes");
+        let back = decode_toc_chapter(&bytes).unwrap();
+        assert_eq!(
+            (back.spine_index, back.level, back.title_str()),
+            (45, 1, "Chapter 12")
+        );
+
+        // An over-budget title truncates to a valid char-boundary prefix,
+        // backing off at most one multibyte char.
+        let long = "A long chapter title \u{2014} reaching past the forty-four byte title budget";
+        let record = toc_chapter_record(long, 2, -1);
+        assert!(record.title_str().len() <= TOC_CHAPTER_TITLE_BYTES);
+        assert!(record.title_str().len() >= TOC_CHAPTER_TITLE_BYTES - 3);
+        assert!(long.starts_with(record.title_str()));
     }
 }
