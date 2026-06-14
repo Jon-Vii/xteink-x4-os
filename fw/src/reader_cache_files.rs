@@ -10,11 +10,12 @@ use proto::cache::{
     decode_block, decode_book_v2_header, decode_book_v2_section, decode_cover_header, decode_page,
     decode_section_header, decode_section_v2_header, decode_toc, encode_block,
     encode_book_v2_header, encode_book_v2_section, encode_page, encode_section_v2_header,
-    encode_toc, section_file_name, BookV2Header, BookV2SectionRecord, SectionV2Header,
-    BLOCK_RECORD_BYTES, BOOK_V2_HEADER_BYTES, BOOK_V2_SECTION_RECORD_BYTES, CACHE_BOOK_FILE,
-    CACHE_COVER_FILE, CACHE_DIR, CACHE_ROOT_DIR, CACHE_SECTIONS_DIR, CACHE_SECTION_FILE_BYTES,
-    CACHE_STATE_FILE, CACHE_V2_DIR, COVER_HEADER_BYTES, PAGE_RECORD_BYTES, SECTION_HEADER_BYTES,
-    SECTION_V2_HEADER_BYTES, TOC_RECORD_BYTES,
+    encode_toc, encode_toc_file_header, section_file_name, BookV2Header, BookV2SectionRecord,
+    SectionV2Header, TocFileHeader, BLOCK_RECORD_BYTES, BOOK_V2_HEADER_BYTES,
+    BOOK_V2_SECTION_RECORD_BYTES, CACHE_BOOK_FILE, CACHE_COVER_FILE, CACHE_DIR, CACHE_ROOT_DIR,
+    CACHE_SECTIONS_DIR, CACHE_SECTION_FILE_BYTES, CACHE_STATE_FILE, CACHE_TOC_FILE, CACHE_V2_DIR,
+    COVER_HEADER_BYTES, PAGE_RECORD_BYTES, SECTION_HEADER_BYTES, SECTION_V2_HEADER_BYTES,
+    TOC_FILE_HEADER_BYTES, TOC_RECORD_BYTES,
 };
 
 const MIGRATE_MAX_SECTIONS: u16 = 16;
@@ -868,6 +869,71 @@ where
     let book_dir = cache.open_dir(key).ok()?;
     let file = book_dir.open_file_in_dir(CACHE_BOOK_FILE, mode).ok()?;
     Some(f(&file))
+}
+
+fn with_v2_toc_file<
+    R,
+    D,
+    T,
+    const MAX_DIRS: usize,
+    const MAX_FILES: usize,
+    const MAX_VOLUMES: usize,
+>(
+    root: &Directory<'_, D, T, MAX_DIRS, MAX_FILES, MAX_VOLUMES>,
+    key: &str,
+    mode: Mode,
+    f: impl for<'a> FnOnce(&File<'a, D, T, MAX_DIRS, MAX_FILES, MAX_VOLUMES>) -> R,
+) -> Option<R>
+where
+    D: embedded_sdmmc::BlockDevice,
+    T: TimeSource,
+{
+    let xteink = root.open_dir(CACHE_ROOT_DIR).ok()?;
+    let cache = xteink.open_dir(CACHE_V2_DIR).ok()?;
+    let book_dir = cache.open_dir(key).ok()?;
+    let file = book_dir.open_file_in_dir(CACHE_TOC_FILE, mode).ok()?;
+    Some(f(&file))
+}
+
+/// Write the full chapter list to TOC.BIN: a header plus `chapter_count`
+/// pre-encoded `TOC_CHAPTER_RECORD_BYTES` records (the caller assembles them
+/// in a scratch buffer during the TOC parse). Keeping the list on the card
+/// lets a long book's TOC stay out of the tight reader RAM.
+pub(crate) fn write_v2_toc_file<
+    D,
+    T,
+    const MAX_DIRS: usize,
+    const MAX_FILES: usize,
+    const MAX_VOLUMES: usize,
+>(
+    root: &Directory<'_, D, T, MAX_DIRS, MAX_FILES, MAX_VOLUMES>,
+    key: &str,
+    source_identity: (u32, u32),
+    chapter_count: usize,
+    records: &[u8],
+) -> bool
+where
+    D: embedded_sdmmc::BlockDevice,
+    T: TimeSource,
+{
+    if ensure_v2_cache_dirs(root, key).is_err() {
+        return false;
+    }
+    with_v2_toc_file(root, key, Mode::ReadWriteCreateOrTruncate, |file| {
+        let header = TocFileHeader {
+            source_hash: source_identity.0,
+            source_size: source_identity.1,
+            chapter_count: chapter_count.min(u16::MAX as usize) as u16,
+        };
+        let mut header_bytes = [0u8; TOC_FILE_HEADER_BYTES];
+        if encode_toc_file_header(header, &mut header_bytes).is_err()
+            || file.write(&header_bytes).is_err()
+        {
+            return false;
+        }
+        !records.is_empty() && file.write(records).is_ok() || records.is_empty()
+    })
+    .unwrap_or(false)
 }
 
 fn with_v2_cover_file<

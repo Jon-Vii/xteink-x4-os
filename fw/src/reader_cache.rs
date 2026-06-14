@@ -58,14 +58,16 @@ struct TocScratch<'a> {
 struct LibraryTocSink<'a, 'p> {
     library: &'a mut ReaderStore,
     package: &'p proto::epub::EpubPackage<'p>,
-    truncated: bool,
+    /// The full chapter list streams into this scratch buffer as fixed-size
+    /// records, then gets written to TOC.BIN. Holds up to
+    /// `buf.len() / TOC_CHAPTER_RECORD_BYTES` chapters.
+    toc_buf: &'a mut [u8],
+    record_count: usize,
+    resident_full: bool,
 }
 
 impl EpubTocSink for LibraryTocSink<'_, '_> {
     fn push_toc(&mut self, title: &str, href: &str, level: u8) -> Result<(), TocError> {
-        if self.truncated {
-            return Ok(());
-        }
         let spine_index = self
             .package
             .spine
@@ -73,14 +75,26 @@ impl EpubTocSink for LibraryTocSink<'_, '_> {
             .position(|item| href_matches_spine(href, item.href))
             .map(|index| index as i16)
             .unwrap_or(-1);
-        if self.library.push_toc_record(title, level, spine_index) {
-            Ok(())
-        } else {
-            // Out of TOC item or text budget: keep the chapters that fit
-            // instead of failing the whole parse.
-            self.truncated = true;
-            Ok(())
+        // Stream the full chapter list (uncapped up to the scratch buffer)
+        // into fixed-size records for TOC.BIN.
+        let offset = self.record_count * proto::cache::TOC_CHAPTER_RECORD_BYTES;
+        if offset + proto::cache::TOC_CHAPTER_RECORD_BYTES <= self.toc_buf.len() {
+            let record = proto::cache::toc_chapter_record(title, level, spine_index);
+            if proto::cache::encode_toc_chapter(
+                &record,
+                &mut self.toc_buf[offset..offset + proto::cache::TOC_CHAPTER_RECORD_BYTES],
+            )
+            .is_ok()
+            {
+                self.record_count += 1;
+            }
         }
+        // The resident copy still feeds the current (capped) overview until
+        // stage 2 switches it to the on-disk list.
+        if !self.resident_full && !self.library.push_toc_record(title, level, spine_index) {
+            self.resident_full = true;
+        }
+        Ok(())
     }
 }
 
@@ -720,17 +734,36 @@ where
     if zip.is_forward_only() {
         library.clear_toc();
     } else {
-        load_epub_toc(
+        // Stream the whole chapter list into the (currently idle) xhtml
+        // scratch as fixed records, then write it to TOC.BIN so the overview
+        // can read it from the card instead of holding it all resident.
+        let toc_record_count = load_epub_toc(
             &mut zip,
             opf_path,
             &package,
             library,
+            &mut scratch.xhtml[..],
             TocScratch {
                 header: scratch.header,
                 name: scratch.name,
                 compressed: scratch.compressed,
                 zip_inflate: &mut *scratch.zip_inflate,
             },
+        );
+        let toc_bytes = toc_record_count
+            .saturating_mul(proto::cache::TOC_CHAPTER_RECORD_BYTES)
+            .min(scratch.xhtml.len());
+        let wrote_toc = reader_cache_files::write_v2_toc_file(
+            root,
+            cache_key,
+            source_identity,
+            toc_record_count,
+            &scratch.xhtml[..toc_bytes],
+        );
+        esp_println::println!(
+            "epub: toc.bin wrote {} chapter(s) ok={}",
+            toc_record_count,
+            wrote_toc
         );
     }
     esp_println::println!(
@@ -955,8 +988,10 @@ fn load_epub_toc<Z>(
     opf_path: &str,
     package: &proto::epub::EpubPackage<'_>,
     library: &mut ReaderStore,
+    toc_buf: &mut [u8],
     scratch: TocScratch<'_>,
-) where
+) -> usize
+where
     Z: EpubZipOps,
 {
     library.clear_toc();
@@ -981,9 +1016,11 @@ fn load_epub_toc<Z>(
         );
 
         let mut sink = LibraryTocSink {
-            library,
+            library: &mut *library,
             package,
-            truncated: false,
+            toc_buf: &mut *toc_buf,
+            record_count: 0,
+            resident_full: false,
         };
         let mut tokenizer = StreamingXmlTokenizer::new();
         let is_ncx = toc_path.as_str().ends_with(".ncx");
@@ -1017,19 +1054,21 @@ fn load_epub_toc<Z>(
             feed_result.is_ok() && tokenizer.finish_nav(&mut parser, &mut sink).is_ok()
         };
 
-        if parse_ok && sink.library.toc_count() > 0 {
+        if parse_ok && (sink.record_count > 0 || sink.library.toc_count() > 0) {
             esp_println::println!(
-                "epub: toc streamed {} item(s) from {} truncated={}",
+                "epub: toc streamed {} chapter(s) ({} resident) from {} overflow={}",
+                sink.record_count,
                 sink.library.toc_count(),
                 toc_path.as_str(),
-                sink.truncated
+                sink.resident_full
             );
-            return;
+            return sink.record_count;
         }
         esp_println::println!("epub: toc parse failed for {}", toc_path.as_str());
         sink.library.clear_toc();
     }
     esp_println::println!("epub: toc unavailable, chapters fall back to spine");
+    0
 }
 
 fn href_matches_spine(href: &str, spine_href: &str) -> bool {
