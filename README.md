@@ -1,6 +1,6 @@
 a fast, light os for the xteink x4 e-reader.
 
-add and remove books from your browser.
+add and remove books through your browser.
 
 ![](docs/home.png)
 
