@@ -6,7 +6,6 @@ use crate::{
 };
 use app_core::{AppView, ReaderState, ReducerContext, SyncError, SyncStatus};
 use core::sync::atomic::Ordering;
-use display::Rect;
 use embassy_futures::select::{select4, Either4};
 use embassy_time::{Duration, Instant};
 
@@ -19,7 +18,6 @@ pub async fn run() {
     let mut state = ReaderState::boot();
     let mut rendering = true;
     let mut render_pending = false;
-    let mut sleeping = false;
     let mut catalog_refresh_requested = false;
     let mut pending_storage: Option<StorageCommand> = None;
     // Type settings changed while away from Reading: the loaded section is
@@ -48,26 +46,13 @@ pub async fn run() {
                         ..
                     }
                 ) {
-                    if sleeping {
-                        esp_println::println!("app: wake");
-                        sleeping = false;
-                        state.view = AppView::Home;
-                        state.dirty = Rect::FULL;
-                        send_render(RenderKind::Page, &state).await;
-                        rendering = true;
-                        render_pending = false;
-                    } else {
-                        esp_println::println!("app: sleep");
-                        sleeping = true;
-                        // Drop any queued repaint: a stale render arriving
-                        // after the sleep command would wake the panel.
-                        render_pending = false;
-                        let _ = DISPLAY_COMMANDS.send(DisplayCommand::Sleep).await;
-                    }
-                    continue;
-                }
-
-                if sleeping {
+                    // Hand off to the power task, which drives the display to its
+                    // sleep image and then deep-sleeps the SoC with the Power
+                    // button armed as the wake source. Waking is a fresh boot
+                    // (deep sleep is terminal), so there is no in-app "asleep"
+                    // state to toggle back out of here.
+                    esp_println::println!("app: sleep requested");
+                    let _ = POWER_EVENTS.send(PowerEvent::SleepNow).await;
                     continue;
                 }
 
@@ -172,7 +157,7 @@ pub async fn run() {
                         }
                         STORAGE_COMMANDS.send(command).await;
                     }
-                    if render_pending && !sleeping {
+                    if render_pending {
                         send_render(RenderKind::Page, &state).await;
                         rendering = true;
                         render_pending = false;
@@ -199,7 +184,7 @@ pub async fn run() {
                     }
                     let should_render = library_event_affects_view(&state, &event);
                     state = state.apply_library_event(ctx, event);
-                    if !should_render || sleeping {
+                    if !should_render {
                         continue;
                     }
                     if rendering {
@@ -219,7 +204,7 @@ pub async fn run() {
                 }
                 let should_render = library_event_affects_view(&state, &event);
                 state = state.apply_library_event(ctx, event);
-                if !should_render || sleeping {
+                if !should_render {
                     continue;
                 }
                 if rendering {
@@ -232,7 +217,7 @@ pub async fn run() {
             }
             Either4::Fourth(event) => {
                 state = state.apply_sync_event(event);
-                if state.view != AppView::Sync || sleeping {
+                if state.view != AppView::Sync {
                     continue;
                 }
                 if rendering {

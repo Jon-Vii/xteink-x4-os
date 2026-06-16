@@ -184,7 +184,8 @@ fn main() -> ! {
     executor.run(|spawner: Spawner| {
         esp_println::println!("main: spawn display");
         spawner.spawn(tasks::display::run(epd_bus, sd_cs)).unwrap();
-        let _lpwr = peripherals.LPWR;
+        esp_println::println!("main: spawn power");
+        spawner.spawn(tasks::power::run(peripherals.LPWR)).unwrap();
         esp_println::println!("main: spawn app");
         spawner.spawn(tasks::app::run()).unwrap();
         esp_println::println!("main: spawn wifi");
