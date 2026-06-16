@@ -468,12 +468,38 @@ pub(crate) fn load_app_state(epd: &mut Epd, sd_cs: &mut Output<'static>) -> Opti
         .flatten()
 }
 
-/// Read just the saved chapter's title from the book's TOC.BIN at boot restore,
-/// so wake-to-Home (which renders before the book is opened) can name the
-/// chapter instead of falling back to a bare numeral. Tags the resolved title
-/// with the book's source identity; a colophon shows it only for that book.
+/// Track the chapter for the page just rendered while reading, past the
+/// reducer's 128-chapter `sd_chapter_for_page` cap. Cheap in-RAM resolve every
+/// render; only touches SD (a 48-byte TOC title read) when the chapter actually
+/// changes. Returns the new uncapped chapter so the caller can forward it to the
+/// reducer, else `None` when nothing changed (or the page map is not resident,
+/// e.g. a built-in book).
 #[inline(never)]
-pub(crate) fn restore_chapter_title(
+pub(crate) fn track_reading_chapter(
+    epd: &mut Epd,
+    sd_cs: &mut Output<'static>,
+    global_page: u32,
+    library: &mut ReaderStore,
+) -> Option<u16> {
+    if library.chapter_page_count == 0 {
+        return None;
+    }
+    let current = library.current_chapter_for_page(global_page);
+    if current == library.current_chapter() {
+        return None;
+    }
+    let index = library.loaded_index?;
+    load_chapter_title(epd, sd_cs, index, current, library);
+    Some(current)
+}
+
+/// Read a chapter's title from the book's TOC.BIN and make it the resident
+/// current chapter. Used at boot restore (so wake-to-Home names the chapter
+/// before the book is opened) and on reading renders when the chapter changes.
+/// Tags the title with the book's source identity; a colophon shows it only for
+/// that book.
+#[inline(never)]
+pub(crate) fn load_chapter_title(
     epd: &mut Epd,
     sd_cs: &mut Output<'static>,
     index: usize,

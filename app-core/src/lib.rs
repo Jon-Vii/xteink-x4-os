@@ -377,6 +377,14 @@ pub enum LibraryEvent {
         chapter: u8,
         page: u32,
     },
+    /// The firmware re-resolved the current chapter for the page just rendered,
+    /// over the whole-book (uncapped) map. Sent on reading renders so the cursor
+    /// keeps tracking past `MAX_SD_CHAPTERS` between section loads, where the
+    /// reducer's own `sd_chapter_for_page` saturates.
+    ChapterCursor {
+        book_id: u32,
+        current_chapter: u16,
+    },
     Restored {
         book_id: u32,
         chapter: u8,
@@ -766,6 +774,18 @@ impl ReaderState {
                         *slot = page.min(u16::MAX as u32) as u16;
                     }
                     self.dirty = Rect::FULL;
+                }
+            }
+            LibraryEvent::ChapterCursor {
+                book_id,
+                current_chapter,
+            } => {
+                if self.book_id == book_id {
+                    // Adopt the firmware's uncapped chapter silently. The Reading
+                    // view shows page-within-chapter, not the chapter itself, so no
+                    // repaint is needed -- Home/sleep/Chapters and the persisted
+                    // position pick up the corrected value when next used.
+                    self.chapter = current_chapter.min(u8::MAX as u16) as u8;
                 }
             }
             LibraryEvent::Restored {

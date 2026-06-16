@@ -10,7 +10,7 @@ use crate::{
     DisplayCommand, DisplayEvent, LibraryEvent, PowerEvent, StorageCommand, DISPLAY_COMMANDS,
     DISPLAY_EVENTS, LATEST_READER_REQUEST_ID, LIBRARY_EVENTS, POWER_EVENTS, STORAGE_COMMANDS,
 };
-use app_core::{ReaderSource, RefreshPlanner, RenderRequest};
+use app_core::{AppView, ReaderSource, RefreshPlanner, RenderRequest};
 use core::sync::atomic::Ordering;
 use display::epd::RefreshMode;
 use display::fb::Framebuffer;
@@ -134,6 +134,23 @@ pub async fn run(mut epd: Epd, mut sd_cs: Output<'static>) {
                         prestage_start.elapsed().as_millis(),
                         Instant::now().as_millis(),
                     );
+                    // Keep the current chapter tracking the page just shown, past
+                    // the reducer's 128-chapter cap. Cheap in-RAM check; only the
+                    // loaded SD reader has an uncapped page map, so this no-ops on
+                    // other views and reads SD only when the chapter changes.
+                    if request.view == AppView::Reading {
+                        if let Some(current) = reader_cache::track_reading_chapter(
+                            &mut epd,
+                            &mut sd_cs,
+                            request.page,
+                            sd_library,
+                        ) {
+                            send_loaded_library_event(&LibraryEvent::ChapterCursor {
+                                book_id: request.book_id,
+                                current_chapter: current,
+                            });
+                        }
+                    }
                     send_required_display_event(&DisplayEvent::Settled);
                     let _ = POWER_EVENTS.try_send(PowerEvent::DisplaySettled);
                 } else {
@@ -749,7 +766,7 @@ fn restore_saved_state(
     // Resolve the chapter title now so wake-to-Home (rendered before the book
     // is opened) names the chapter; without this the colophon shows a numeral
     // until the book is first opened this session.
-    reader_cache::restore_chapter_title(epd, sd_cs, usize::from(index), record.chapter, library);
+    reader_cache::load_chapter_title(epd, sd_cs, usize::from(index), record.chapter, library);
     send_required_library_event(&LibraryEvent::Restored {
         book_id: ReaderSource::sd(index).book_id(),
         chapter: record.chapter.min(u8::MAX as u16) as u8,

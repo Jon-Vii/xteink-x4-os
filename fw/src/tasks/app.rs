@@ -283,6 +283,9 @@ fn library_event_affects_view(state: &ReaderState, event: &crate::LibraryEvent) 
                     .map(|stored| *stored != page.min(u16::MAX as u32) as u16)
                     .unwrap_or(false)
         }
+        // The reducer adopts the new chapter without a repaint (Reading shows
+        // page-within-chapter, not the chapter), so it never forces a render.
+        crate::LibraryEvent::ChapterCursor { .. } => false,
         crate::LibraryEvent::Restored { .. } => true,
     }
 }
