@@ -16,9 +16,9 @@ pub async fn run() {
     esp_println::println!("app: started");
     let ctx = reducer_context();
     let mut state = ReaderState::boot();
-    let mut rendering = true;
+    let mut rendering = false;
     let mut render_pending = false;
-    let mut catalog_refresh_requested = false;
+    let mut catalog_refresh_requested = true;
     let mut pending_storage: Option<StorageCommand> = None;
     // Type settings changed while away from Reading: the loaded section is
     // paginated under the old layout, so the next entry into Reading must
@@ -27,7 +27,21 @@ pub async fn run() {
     let mut opening_book: Option<u32> = None;
     let mut suppress_input_until_open_settled = false;
     let mut block_confirm_until: Option<Instant> = None;
-    send_render(RenderKind::Boot, &state).await;
+    // Defer the first paint. ReaderState::boot() defaults to the built-in guide
+    // (book_id 1), so drawing it now flashes "About This Reader" until the saved
+    // book loads from SD ~1.5s later. Instead, kick the catalog + saved-position
+    // restore now and leave the retained image (the sleep screen, on a deep-sleep
+    // wake) up until it resolves; the first render is sent when Restored/Scanned
+    // lands (see first_render_kind), so wake is a single refresh straight onto the
+    // restored book. Now that sleep is terminal, wake is a full reboot — before
+    // that this cold-boot path never showed, the real book stayed resident.
+    let mut boot_render_pending = true;
+    if STORAGE_COMMANDS
+        .try_send(StorageCommand::LoadCatalogCache)
+        .is_err()
+    {
+        esp_println::println!("app: storage queue full for catalog cache");
+    }
 
     loop {
         match select4(
@@ -182,7 +196,8 @@ pub async fn run() {
                             opening_book = None;
                         }
                     }
-                    let should_render = library_event_affects_view(&state, &event);
+                    let should_render =
+                        boot_render_pending || library_event_affects_view(&state, &event);
                     state = state.apply_library_event(ctx, event);
                     if !should_render {
                         continue;
@@ -190,7 +205,7 @@ pub async fn run() {
                     if rendering {
                         render_pending = true;
                     } else {
-                        send_render(RenderKind::Page, &state).await;
+                        send_render(first_render_kind(&mut boot_render_pending), &state).await;
                         rendering = true;
                         render_pending = false;
                     }
@@ -202,7 +217,8 @@ pub async fn run() {
                         opening_book = None;
                     }
                 }
-                let should_render = library_event_affects_view(&state, &event);
+                let should_render =
+                    boot_render_pending || library_event_affects_view(&state, &event);
                 state = state.apply_library_event(ctx, event);
                 if !should_render {
                     continue;
@@ -210,7 +226,7 @@ pub async fn run() {
                 if rendering {
                     render_pending = true;
                 } else {
-                    send_render(RenderKind::Page, &state).await;
+                    send_render(first_render_kind(&mut boot_render_pending), &state).await;
                     rendering = true;
                     render_pending = false;
                 }
@@ -229,6 +245,17 @@ pub async fn run() {
                 }
             }
         }
+    }
+}
+
+/// The first paint after boot uses `RenderKind::Boot` — a full refresh that
+/// re-initialises the panel from its post-deep-sleep off state. Every paint
+/// after that is an ordinary page. Consumes the one-shot flag.
+fn first_render_kind(boot_render_pending: &mut bool) -> RenderKind {
+    if core::mem::take(boot_render_pending) {
+        RenderKind::Boot
+    } else {
+        RenderKind::Page
     }
 }
 
