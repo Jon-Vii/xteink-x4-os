@@ -122,6 +122,7 @@ pub async fn run(mut adc: Adc<'static, ADC1>, mut pins: InputPins) {
     let mut page_stable = StableButton::new();
     let mut raw_log_ticks = 0u8;
     let mut reported_percent: Option<u8> = None;
+    let mut battery_seeded = false;
 
     loop {
         Timer::after_millis(POLL_MS).await;
@@ -149,6 +150,16 @@ pub async fn run(mut adc: Adc<'static, ADC1>, mut pins: InputPins) {
         }
 
         let percent = stable_percent(&mut reported_percent, battery_percent(sample.aux));
+
+        // The app boots with a placeholder 100% battery and only learns the
+        // real charge from a Sample, which otherwise rides on a button press.
+        // Push one button-less reading now so the first screen after a wake
+        // (deep sleep is terminal -- wake is a cold boot) shows the true
+        // charge instead of a flat 100%.
+        if !battery_seeded {
+            emit(None, sample, percent);
+            battery_seeded = true;
+        }
 
         let power_pressed = debounce_active_low(pins.power.is_low(), &mut power_ticks);
         if power_pressed && !last_power {

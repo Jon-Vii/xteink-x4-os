@@ -53,6 +53,17 @@ pub async fn run() {
         .await
         {
             Either4::First(event) => {
+                if matches!(event, InputEvent::Sample { button: None, .. }) {
+                    // A button-less sample is a pure battery reading (the input
+                    // task emits one at boot, before the first paint). Fold the
+                    // charge into state but spend no panel refresh on it -- the
+                    // value rides out on the next real paint. At boot that's the
+                    // deferred Restored paint (see boot_render_pending), so the
+                    // first screen shows the true charge instead of boot()'s
+                    // 100% placeholder.
+                    state = state.apply_input(ctx, event);
+                    continue;
+                }
                 if matches!(
                     event,
                     InputEvent::Sample {
